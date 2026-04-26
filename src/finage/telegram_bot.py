@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import logging
+
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+from finage.digest import DigestService
+from finage.models import DigestResult
+from finage.settings import Settings
+
+logger = logging.getLogger(__name__)
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+SAFE_MESSAGE_LIMIT = 3900
+
+
+def is_authorized(update: Update, allowed_ids: set[int]) -> bool:
+    if not allowed_ids:
+        return False
+
+    user_id = update.effective_user.id if update.effective_user else None
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    return user_id in allowed_ids or chat_id in allowed_ids
+
+
+def chunk_text(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def send_text(bot: Bot, chat_id: int, text: str) -> None:
+    for chunk in chunk_text(text):
+        await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+
+
+async def send_digest(settings: Settings, digest: DigestResult) -> None:
+    if settings.telegram_default_chat_id is None:
+        raise ValueError("TELEGRAM_DEFAULT_CHAT_ID is required for `finage digest send`")
+
+    async with Bot(token=settings.telegram_bot_token) as bot:
+        await send_text(bot, settings.telegram_default_chat_id, digest.digest)
+
+
+class TelegramDigestBot:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.allowed_ids = settings.telegram_allowed_id_set
+
+    def run(self) -> None:
+        application = ApplicationBuilder().token(self.settings.telegram_bot_token).build()
+        application.add_handler(CommandHandler("start", self.start))
+        application.add_handler(CommandHandler("help", self.help))
+        application.add_handler(CommandHandler("digest", self.digest))
+        application.run_polling()
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+        await update.effective_message.reply_text(
+            "Finage is running. Use /digest to generate the latest WSB momentum digest."
+        )
+
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+        await update.effective_message.reply_text(
+            "Commands:\n/digest - scrape WSB, generate a Gemini digest, and return it here."
+        )
+
+    async def digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        await update.effective_message.reply_text("Generating WSB digest...")
+        try:
+            result = await DigestService(self.settings).generate()
+            for chunk in chunk_text(result.digest):
+                await update.effective_message.reply_text(chunk, disable_web_page_preview=True)
+        except Exception:
+            logger.exception("Failed to generate digest")
+            await update.effective_message.reply_text("Digest generation failed. Check the Pi logs.")
+
+    async def _guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if is_authorized(update, self.allowed_ids):
+            return True
+
+        if update.effective_chat:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Unauthorized.")
+        return False
