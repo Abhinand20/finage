@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
+import ssl
 from collections import defaultdict
 from typing import Iterable
 
+import aiohttp
 import asyncpraw
 import httpx
 
@@ -27,6 +29,26 @@ EXCLUDED_LINK_DOMAINS = (
 )
 EXCLUDED_FLAIRS = {"Meme", "Shitpost", "Gain", "Loss"}
 URL_RE = re.compile(r"https?://[^\s)\]}\"']+", re.IGNORECASE)
+
+# Reddit's edge (Fastly) JA3-fingerprints TLS handshakes and returns a 403 with
+# an HTML "blocked" page when it sees Python/OpenSSL's default cipher ordering
+# from some hosts (notably arm64 Raspberry Pi builds). Pinning the cipher list
+# to the one curl ships with produces a JA3 fingerprint that Reddit accepts.
+_REDDIT_TLS_CIPHERS = (
+    "ECDHE-ECDSA-AES128-GCM-SHA256:"
+    "ECDHE-RSA-AES128-GCM-SHA256:"
+    "ECDHE-ECDSA-CHACHA20-POLY1305:"
+    "ECDHE-RSA-CHACHA20-POLY1305:"
+    "ECDHE-ECDSA-AES256-GCM-SHA384:"
+    "ECDHE-RSA-AES256-GCM-SHA384"
+)
+
+
+def _build_reddit_session() -> aiohttp.ClientSession:
+    ssl_context = ssl.create_default_context()
+    ssl_context.set_ciphers(_REDDIT_TLS_CIPHERS)
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    return aiohttp.ClientSession(connector=connector)
 
 
 def is_valid_external_link(url: str) -> bool:
@@ -134,6 +156,7 @@ class WsbCollector:
             client_id=self.settings.reddit_client_id,
             client_secret=self.settings.reddit_client_secret,
             user_agent=self.settings.reddit_user_agent,
+            requestor_kwargs={"session": _build_reddit_session()},
         )
 
     async def _post_evidence(self, submission, candidate_tickers: list[str]) -> PostEvidence | None:

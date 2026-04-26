@@ -63,77 +63,73 @@ Available bot commands:
 
 The bot rejects requests unless the effective Telegram user ID or chat ID is listed in `TELEGRAM_ALLOWED_IDS`.
 
-## Raspberry Pi Deployment
+## Raspberry Pi Deployment (PM2)
 
-Clone the repo on the Pi, install `uv`, run `uv sync`, and create `.env` in the repo root.
+This setup runs Finage under PM2 for crash recovery and reboot persistence.
 
-For the long-running bot, create `/etc/systemd/system/finage-bot.service`:
-
-```ini
-[Unit]
-Description=Finage Telegram bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/pi/finage
-EnvironmentFile=/home/pi/finage/.env
-ExecStart=/usr/local/bin/uv run finage bot
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable it:
+1. Clone the repo on the Pi at `/home/alphacode/finage`.
+2. Install `uv`, Node.js, and npm.
+3. Install project dependencies and set up `.env`:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now finage-bot.service
+cd /home/alphacode/finage
+uv sync
+cp .env.example .env
 ```
 
-For scheduled daily sends, use cron:
-
-```cron
-0 7 * * 1-5 cd /home/pi/finage && /usr/local/bin/uv run finage digest send >> /home/pi/finage/data/cron.log 2>&1
-```
-
-Or create a systemd oneshot service `/etc/systemd/system/finage-digest.service`:
-
-```ini
-[Unit]
-Description=Send Finage WSB digest
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/pi/finage
-EnvironmentFile=/home/pi/finage/.env
-ExecStart=/usr/local/bin/uv run finage digest send
-```
-
-And a timer `/etc/systemd/system/finage-digest.timer`:
-
-```ini
-[Unit]
-Description=Run Finage WSB digest each weekday morning
-
-[Timer]
-OnCalendar=Mon..Fri 07:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-Enable the timer:
+4. Install PM2 globally:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now finage-digest.timer
+sudo npm install -g pm2
+```
+
+5. Start Finage with the included PM2 ecosystem file:
+
+```bash
+cd /home/alphacode/finage
+pm2 start ecosystem.config.cjs
+```
+
+This starts:
+
+- `finage-bot`: always-on Telegram bot (`uv run finage bot`).
+- `finage-digest`: weekday 07:00 scheduled digest sender (`uv run finage digest send`).
+
+6. Save PM2 process state and enable startup on boot:
+
+```bash
+pm2 save
+pm2 startup systemd -u alphacode --hp /home/alphacode
+```
+
+Run the `sudo ...` command printed by `pm2 startup`, then run `pm2 save` again.
+
+### PM2 Verify and Operations
+
+Check process status:
+
+```bash
+pm2 status
+```
+
+View logs:
+
+```bash
+pm2 logs finage-bot
+pm2 logs finage-digest
+```
+
+Run a one-off manual digest send:
+
+```bash
+cd /home/alphacode/finage
+uv run finage digest send
+```
+
+After reboot, confirm both processes are registered:
+
+```bash
+pm2 status
 ```
 
 ## Latest Artifacts
