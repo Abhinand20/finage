@@ -1,0 +1,17 @@
+---
+description: Commit completed project changes when working in git
+alwaysApply: true
+---
+
+# Commit After Completed Work
+
+When working in this project and the workspace is a git repo, treat completed changes, bug fixes, and updates as needing a commit unless the user explicitly says not to.
+
+Before committing:
+- Run `git status`, `git diff`, and recent `git log` to understand all changes and commit style.
+- Commit only files relevant to the completed task.
+- Do not commit secrets, `.env` files, credentials, local artifacts, or unrelated user changes.
+- If unrelated changes are present, leave them unstaged.
+- Run the relevant checks/tests when practical and mention any that were skipped.
+
+Create a concise commit message that describes the outcome and why it matters. Do not push unless the user explicitly asks.

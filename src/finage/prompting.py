@@ -4,10 +4,12 @@ import json
 from importlib import resources
 from pathlib import Path
 
-from finage.models import WsbSnapshot
+from finage.models import DigestResult, WsbSnapshot
 
 DEFAULT_DIGEST_PROMPT = "wsb_digest.md"
 EVIDENCE_PLACEHOLDER = "{evidence_json}"
+PREVIOUS_DIGEST_PLACEHOLDER = "{previous_digest_json}"
+NO_PREVIOUS_DIGEST = {"available": False, "reason": "No previous digest artifact found."}
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -67,10 +69,34 @@ def load_digest_prompt_template(prompt_template_path: Path | None = None) -> str
     return resources.files("finage.prompts").joinpath(DEFAULT_DIGEST_PROMPT).read_text(encoding="utf-8")
 
 
-def render_digest_prompt(snapshot: WsbSnapshot, *, prompt_template_path: Path | None = None) -> str:
+def build_previous_digest_payload(previous_digest: DigestResult | None) -> dict:
+    if previous_digest is None:
+        return NO_PREVIOUS_DIGEST
+
+    return {
+        "available": True,
+        "generated_at": previous_digest.generated_at.isoformat(),
+        "provider": previous_digest.provider,
+        "model": previous_digest.model,
+        "digest": previous_digest.digest,
+    }
+
+
+def render_digest_prompt(
+    snapshot: WsbSnapshot,
+    *,
+    previous_digest: DigestResult | None = None,
+    prompt_template_path: Path | None = None,
+) -> str:
     payload = build_digest_payload(snapshot)
     evidence_json = json.dumps(payload, indent=2, default=str)
+    previous_digest_json = json.dumps(build_previous_digest_payload(previous_digest), indent=2, default=str)
     template = load_digest_prompt_template(prompt_template_path)
     if EVIDENCE_PLACEHOLDER not in template:
         raise ValueError(f"Digest prompt template must include {EVIDENCE_PLACEHOLDER}")
-    return template.replace(EVIDENCE_PLACEHOLDER, evidence_json)
+
+    prompt = template.replace(EVIDENCE_PLACEHOLDER, evidence_json)
+    if PREVIOUS_DIGEST_PLACEHOLDER in prompt:
+        return prompt.replace(PREVIOUS_DIGEST_PLACEHOLDER, previous_digest_json)
+
+    return f"{prompt}\n\nPrevious Digest JSON:\n{previous_digest_json}\n"

@@ -34,9 +34,14 @@ class DigestService:
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
 
     async def generate(self) -> DigestResult:
+        previous_digest = self.artifact_store.read_latest_digest()
         snapshot = await self.collector.collect()
         snapshot_path = self.artifact_store.write_snapshot(snapshot)
-        prompt = render_digest_prompt(snapshot, prompt_template_path=self.settings.digest_prompt_path)
+        prompt = render_digest_prompt(
+            snapshot,
+            previous_digest=previous_digest,
+            prompt_template_path=self.settings.digest_prompt_path,
+        )
         digest_text = await self.llm_provider.generate(prompt)
 
         result = DigestResult(

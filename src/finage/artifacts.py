@@ -6,16 +6,25 @@ from pydantic import BaseModel
 
 from finage.models import DigestResult, WsbSnapshot
 
+LATEST_DIGEST_FILENAME = "latest_digest.json"
+LATEST_SNAPSHOT_FILENAME = "latest_wsb_snapshot.json"
+
 
 class ArtifactStore:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
 
     def write_snapshot(self, snapshot: WsbSnapshot) -> Path:
-        return self._write_model("latest_wsb_snapshot.json", snapshot)
+        return self._write_model(LATEST_SNAPSHOT_FILENAME, snapshot)
 
     def write_digest(self, digest: DigestResult) -> Path:
-        return self._write_model("latest_digest.json", digest)
+        return self._write_model(LATEST_DIGEST_FILENAME, digest)
+
+    def read_latest_digest(self) -> DigestResult | None:
+        path = self.data_dir / LATEST_DIGEST_FILENAME
+        if not path.exists():
+            return None
+        return DigestResult.model_validate_json(path.read_text(encoding="utf-8"))
 
     def _write_model(self, filename: str, model: BaseModel) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)

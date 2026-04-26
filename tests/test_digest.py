@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from finage.digest import DigestService, build_digest_payload, build_digest_prompt
-from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.models import DigestResult, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.prompting import render_digest_prompt
 from finage.settings import Settings
 
@@ -20,7 +20,11 @@ class FakeLlm:
     name = "fake"
     model = "fake-model"
 
+    def __init__(self) -> None:
+        self.last_prompt = ""
+
     async def generate(self, prompt: str) -> str:
+        self.last_prompt = prompt
         assert "Evidence JSON" in prompt
         return "WSB Momentum\n- TSLA: test digest.\nNot financial advice; WSB data is noisy."
 
@@ -82,14 +86,25 @@ def test_render_digest_prompt_supports_custom_template(tmp_path: Path) -> None:
 
     assert prompt.startswith("Custom prompt")
     assert "TSLA catalyst thread" in prompt
+    assert "Previous Digest JSON" in prompt
+
+
+def test_render_digest_prompt_includes_previous_digest() -> None:
+    previous = DigestResult(provider="gemini", model="gemini-test", digest="Yesterday: TSLA persisted.")
+
+    prompt = render_digest_prompt(make_snapshot(), previous_digest=previous)
+
+    assert "Previous Digest JSON" in prompt
+    assert "Yesterday: TSLA persisted." in prompt
 
 
 @pytest.mark.asyncio
 async def test_digest_service_writes_latest_artifacts(tmp_path: Path) -> None:
+    llm = FakeLlm()
     service = DigestService(
         make_settings(tmp_path),
         collector=FakeCollector(make_snapshot()),
-        llm_provider=FakeLlm(),
+        llm_provider=llm,
     )
 
     result = await service.generate()
@@ -97,3 +112,18 @@ async def test_digest_service_writes_latest_artifacts(tmp_path: Path) -> None:
     assert "TSLA" in result.digest
     assert (tmp_path / "latest_wsb_snapshot.json").exists()
     assert (tmp_path / "latest_digest.json").exists()
+    assert "No previous digest artifact found" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_digest_service_includes_latest_digest_in_next_prompt(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    previous = DigestResult(provider="gemini", model="gemini-test", digest="Yesterday: AMD led the digest.")
+    (tmp_path / "latest_digest.json").write_text(previous.model_dump_json(), encoding="utf-8")
+    llm = FakeLlm()
+
+    service = DigestService(settings, collector=FakeCollector(make_snapshot()), llm_provider=llm)
+
+    await service.generate()
+
+    assert "Yesterday: AMD led the digest." in llm.last_prompt

@@ -15,6 +15,7 @@ Rules:
 - Prioritize signal over hype; ignore low-effort memes unless dominant
 - Weigh repeated ideas more than isolated comments
 - Do NOT fabricate missing data
+- Compare against the previous digest when available and highlight any key patterns that emerge. Do this only if it is relevant.
 
 Output:
 - One-line title
@@ -23,6 +24,9 @@ Output:
 
 End with:
 A recommendation based on the evidence on what could be good plays for long and short term investments.
+
+Previous Digest JSON:
+{previous_digest_json}
 
 Evidence JSON:
 {evidence_json}
