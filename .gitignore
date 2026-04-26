@@ -1,0 +1,7 @@
+wsb-analyst-mcp/
+.env
+.venv/
+data/*.json
+data/*.log
+__pycache__/
+.pytest_cache/
