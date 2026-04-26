@@ -42,8 +42,11 @@ class DigestService:
             previous_digest=previous_digest,
             prompt_template_path=self.settings.digest_prompt_path,
         )
+        # print('-' * 20)
+        # print("Sending the following prompt to the LLM:")
+        # print(prompt)
+        # print('-' * 20)
         digest_text = await self.llm_provider.generate(prompt)
-
         result = DigestResult(
             provider=self.llm_provider.name,
             model=self.llm_provider.model,

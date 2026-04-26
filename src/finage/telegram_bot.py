@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import html
 import logging
+import re
 
 from telegram import Bot, Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from finage.digest import DigestService
@@ -13,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 SAFE_MESSAGE_LIMIT = 3900
+CODE_RE = re.compile(r"`([^`]+)`")
+BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 
 
 def is_authorized(update: Update, allowed_ids: set[int]) -> bool:
@@ -42,9 +48,45 @@ def chunk_text(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> list[str]:
     return chunks
 
 
-async def send_text(bot: Bot, chat_id: int, text: str) -> None:
+def markdown_to_telegram_html(text: str) -> str:
+    """Render common Markdown output as Telegram-supported HTML."""
+
+    def format_inline(value: str) -> str:
+        escaped = html.escape(value)
+        escaped = CODE_RE.sub(r"<code>\1</code>", escaped)
+        return BOLD_RE.sub(r"<b>\1</b>", escaped)
+
+    lines: list[str] = []
+    for line in text.splitlines():
+        heading = HEADING_RE.match(line)
+        if heading:
+            heading_text = heading.group(2).strip()
+            if heading_text.startswith("**") and heading_text.endswith("**"):
+                heading_text = heading_text[2:-2]
+            lines.append(f"<b>{format_inline(heading_text)}</b>")
+        else:
+            lines.append(format_inline(line))
+
+    return "\n".join(lines)
+
+
+async def send_text(bot: Bot, chat_id: int, text: str, *, parse_mode: str | None = None) -> None:
     for chunk in chunk_text(text):
-        await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=chunk,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+
+
+async def send_markdown_text(bot: Bot, chat_id: int, text: str) -> None:
+    await send_text(
+        bot,
+        chat_id,
+        markdown_to_telegram_html(text),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def send_digest(settings: Settings, digest: DigestResult) -> None:
@@ -52,7 +94,7 @@ async def send_digest(settings: Settings, digest: DigestResult) -> None:
         raise ValueError("TELEGRAM_DEFAULT_CHAT_ID is required for `finage digest send`")
 
     async with Bot(token=settings.telegram_bot_token) as bot:
-        await send_text(bot, settings.telegram_default_chat_id, digest.digest)
+        await send_markdown_text(bot, settings.telegram_default_chat_id, digest.digest)
 
 
 class TelegramDigestBot:
@@ -88,8 +130,7 @@ class TelegramDigestBot:
         await update.effective_message.reply_text("Generating WSB digest...")
         try:
             result = await DigestService(self.settings).generate()
-            for chunk in chunk_text(result.digest):
-                await update.effective_message.reply_text(chunk, disable_web_page_preview=True)
+            await send_markdown_text(context.bot, update.effective_chat.id, result.digest)
         except Exception:
             logger.exception("Failed to generate digest")
             await update.effective_message.reply_text("Digest generation failed. Check the Pi logs.")

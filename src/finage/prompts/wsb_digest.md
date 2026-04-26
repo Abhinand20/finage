@@ -21,6 +21,7 @@ Output:
 - One-line title
 - Concise bullets
 - Max 5-7 tickers
+- Use simple Markdown formatting, especially `**bold**` for ticker names and section headers
 
 End with:
 A recommendation based on the evidence on what could be good plays for long and short term investments.
