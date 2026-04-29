@@ -20,6 +20,7 @@ SAFE_MESSAGE_LIMIT = 3900
 CODE_RE = re.compile(r"`([^`]+)`")
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
 
 def is_authorized(update: Update, allowed_ids: set[int]) -> bool:
@@ -52,10 +53,33 @@ def chunk_text(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> list[str]:
 def markdown_to_telegram_html(text: str) -> str:
     """Render common Markdown output as Telegram-supported HTML."""
 
+    def _format_plain_segment(seg: str) -> str:
+        """Apply Markdown links, escaping, and bold to text outside inline code spans."""
+
+        links: list[str] = []
+
+        def link_sub(match: re.Match[str]) -> str:
+            idx = len(links)
+            label = html.escape(match.group(1))
+            href = html.escape(match.group(2), quote=True)
+            links.append(f'<a href="{href}">{label}</a>')
+            return f"\x00LNK{idx}\x00"
+
+        out = MD_LINK_RE.sub(link_sub, seg)
+        out = html.escape(out)
+        for idx, anchor in enumerate(links):
+            out = out.replace(f"\x00LNK{idx}\x00", anchor)
+        return BOLD_RE.sub(r"<b>\1</b>", out)
+
     def format_inline(value: str) -> str:
-        escaped = html.escape(value)
-        escaped = CODE_RE.sub(r"<code>\1</code>", escaped)
-        return BOLD_RE.sub(r"<b>\1</b>", escaped)
+        pieces: list[str] = []
+        last_end = 0
+        for m in CODE_RE.finditer(value):
+            pieces.append(_format_plain_segment(value[last_end : m.start()]))
+            pieces.append(f"<code>{html.escape(m.group(1))}</code>")
+            last_end = m.end()
+        pieces.append(_format_plain_segment(value[last_end:]))
+        return "".join(pieces)
 
     lines: list[str] = []
     for line in text.splitlines():

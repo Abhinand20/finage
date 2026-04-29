@@ -47,6 +47,18 @@ def test_markdown_to_telegram_html_formats_common_markdown() -> None:
     assert "&lt;risk&gt;" in formatted
 
 
+def test_markdown_to_telegram_html_converts_markdown_links_to_anchor_tags() -> None:
+    formatted = markdown_to_telegram_html(
+        "Sources: [SEC filing](https://example.com/a?x=1&y=2); see also [A&B](https://example.com/path)."
+    )
+
+    assert (
+        formatted
+        == "Sources: <a href=\"https://example.com/a?x=1&amp;y=2\">SEC filing</a>; "
+        'see also <a href="https://example.com/path">A&amp;B</a>.'
+    )
+
+
 class FakeBot:
     def __init__(self) -> None:
         self.messages = []
