@@ -5,6 +5,42 @@ from finage.models import TrendingTicker
 from finage.settings import DEFAULT_STOCK_SUBREDDITS, Settings
 
 
+class FakeApeWisdomResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _patch_httpx_client(monkeypatch: pytest.MonkeyPatch, handler) -> list[str]:
+    """handler(url: str) -> FakeApeWisdomResponse | BaseException to raise from get()"""
+    calls: list[str] = []
+
+    def client_factory(**kwargs):
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                calls.append(url)
+                out = handler(url)
+                if isinstance(out, BaseException):
+                    raise out
+                return out
+
+        return _Client()
+
+    monkeypatch.setattr("finage.collector.httpx.AsyncClient", client_factory)
+    return calls
+
+
 def test_extract_ticker_mentions_prefers_candidate_tickers() -> None:
     candidates = ["TSLA", "NVDA", "A"]
     text = "WSB is watching $TSLA and nvda, but a normal article should not match ticker A."
@@ -40,6 +76,89 @@ def test_settings_defaults_to_stock_subreddit_config() -> None:
 
     assert settings.wsb_subreddits == DEFAULT_STOCK_SUBREDDITS
     assert settings.wsb_subreddit == "wallstreetbets"
+
+
+@pytest.mark.asyncio
+async def test_fetch_trending_tickers_requests_each_configured_subreddit(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(url: str) -> FakeApeWisdomResponse:
+        return FakeApeWisdomResponse({"results": []})
+
+    calls = _patch_httpx_client(monkeypatch, handler)
+    settings = make_settings()
+    settings.wsb_subreddits = ["stocks", "options", "wallstreetbets"]
+
+    trending = await WsbCollector(settings).fetch_trending_tickers()
+
+    assert trending == []
+    assert len(calls) == 3
+    assert {c.split("/")[-1] for c in calls} == {"stocks", "options", "wallstreetbets"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_trending_tickers_merges_duplicates_across_subreddits(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(url: str) -> FakeApeWisdomResponse:
+        if "stocks" in url:
+            return FakeApeWisdomResponse({"results": [{"ticker": "TSLA", "mentions": 10, "upvotes": 5}]})
+        if "options" in url:
+            return FakeApeWisdomResponse({"results": [{"ticker": "TSLA", "mentions": 3, "upvotes": 2}]})
+        return FakeApeWisdomResponse({"results": []})
+
+    calls = _patch_httpx_client(monkeypatch, handler)
+    settings = make_settings()
+    settings.wsb_subreddits = ["stocks", "options"]
+    settings.wsb_ticker_limit = 10
+
+    trending = await WsbCollector(settings).fetch_trending_tickers()
+
+    assert len(calls) == 2
+    assert len(trending) == 1
+    assert trending[0].ticker == "TSLA"
+    assert trending[0].rank == 1
+    assert trending[0].mentions == 13
+    assert trending[0].upvotes == 7
+
+
+@pytest.mark.asyncio
+async def test_fetch_trending_tickers_skips_failed_filter_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(url: str) -> FakeApeWisdomResponse | RuntimeError:
+        if "broken_filter" in url:
+            return RuntimeError("apewisdom down")
+        if "stocks" in url:
+            return FakeApeWisdomResponse({"results": [{"ticker": "NVDA", "mentions": 5, "upvotes": 1}]})
+        return FakeApeWisdomResponse({"results": []})
+
+    calls = _patch_httpx_client(monkeypatch, handler)
+    settings = make_settings()
+    settings.wsb_subreddits = ["broken_filter", "stocks"]
+
+    trending = await WsbCollector(settings).fetch_trending_tickers()
+
+    assert len(calls) == 2
+    assert trending == [TrendingTicker(ticker="NVDA", rank=1, mentions=5, upvotes=1)]
+
+
+@pytest.mark.asyncio
+async def test_fetch_trending_tickers_ranks_by_mentions_upvotes_then_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(url: str) -> FakeApeWisdomResponse:
+        return FakeApeWisdomResponse(
+            {
+                "results": [
+                    {"ticker": "ZZZZ", "mentions": 5, "upvotes": 100},
+                    {"ticker": "AAAA", "mentions": 10, "upvotes": 0},
+                    {"ticker": "BBBB", "mentions": 10, "upvotes": 5},
+                ]
+            }
+        )
+
+    _patch_httpx_client(monkeypatch, handler)
+    settings = make_settings()
+    settings.wsb_subreddits = ["wallstreetbets"]
+    settings.wsb_ticker_limit = 10
+
+    trending = await WsbCollector(settings).fetch_trending_tickers()
+
+    assert [t.ticker for t in trending] == ["BBBB", "AAAA", "ZZZZ"]
+    assert [t.rank for t in trending] == [1, 2, 3]
 
 
 class FakeSubmissionWithoutComments:

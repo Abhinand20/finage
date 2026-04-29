@@ -4,7 +4,7 @@ Finage is a small personal financial analyst MVP. Phase 1 generates a ticker-fir
 
 ## What M1 Does
 
-- Pulls currently trending WSB tickers from ApeWisdom.
+- Pulls currently trending tickers from ApeWisdom for each configured stock subreddit filter.
 - Scrapes recent posts and top comments from the configured stock subreddit list with Reddit API credentials.
 - Keeps only evidence connected to the trending tickers.
 - Uses Gemini API to write a concise Telegram-friendly digest.
