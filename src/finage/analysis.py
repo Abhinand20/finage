@@ -7,7 +7,9 @@ from typing import Protocol
 
 from finage.artifacts import ArtifactStore
 from finage.collector import WsbCollector
+from finage.llm import LlmProvider, create_llm_provider
 from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.prompting import render_ticker_why_prompt
 from finage.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -405,10 +407,12 @@ class MomentumAnalysisService:
         *,
         collector: Collector | None = None,
         artifact_store: ArtifactStore | None = None,
+        llm_provider: LlmProvider | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
+        self.llm_provider = llm_provider or create_llm_provider(settings)
 
     async def live(self) -> str:
         logger.info("Starting live momentum scan")
@@ -443,3 +447,18 @@ class MomentumAnalysisService:
             len(snapshot.ticker_evidence),
         )
         return format_movers_brief(snapshot, previous)
+
+    async def why(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        logger.info("Starting why scan for ticker=%s", ticker)
+        snapshot = await self.collector.collect()
+        trending = _trending_by_ticker(snapshot).get(ticker)
+        evidence = _evidence_by_ticker(snapshot).get(ticker)
+        if evidence is None:
+            logger.info("Skipping why LLM call for ticker=%s because no evidence was found", ticker)
+            return format_ticker_brief(snapshot, ticker)
+
+        prompt = render_ticker_why_prompt(snapshot, ticker, evidence, trending)
+        logger.info("Rendered why prompt for ticker=%s chars=%s", ticker, len(prompt))
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Why {ticker}?**\n{explanation.strip()}"

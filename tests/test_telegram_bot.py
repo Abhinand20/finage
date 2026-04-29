@@ -99,6 +99,7 @@ async def test_help_lists_live_command() -> None:
 
     assert "/live" in message.replies[0]
     assert "/ticker <stock>" in message.replies[0]
+    assert "/why <stock>" in message.replies[0]
     assert "/movers" in message.replies[0]
 
 
@@ -157,6 +158,63 @@ async def test_ticker_sends_focused_markdown_brief(monkeypatch: pytest.MonkeyPat
     assert message.replies == ["Scanning social momentum for TSLA..."]
     assert bot.messages[0]["chat_id"] == 999
     assert "<b>TSLA Social Momentum</b>" in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_why_requires_one_symbol_argument() -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    await TelegramDigestBot(make_settings()).why(update, context)
+
+    assert message.replies == ["Usage: /why TSLA"]
+
+
+@pytest.mark.asyncio
+async def test_why_rejects_invalid_symbol_before_scanning() -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=["TSLA1"])
+
+    await TelegramDigestBot(make_settings()).why(update, context)
+
+    assert "for example `/why TSLA`" in message.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_why_sends_markdown_explanation(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def why(self, symbol: str) -> str:
+            assert symbol == "TSLA"
+            return "**Why TSLA?**\n**Read:** delivery chatter"
+
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=["tsla"])
+
+    await TelegramDigestBot(make_settings()).why(update, context)
+
+    assert message.replies == ["Analyzing why TSLA is moving socially..."]
+    assert bot.messages[0]["chat_id"] == 999
+    assert "<b>Why TSLA?</b>" in bot.messages[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,24 @@ def make_settings(tmp_path: Path) -> Settings:
     )
 
 
+class FakeLlm:
+    name = "fake"
+    model = "fake-model"
+
+    def __init__(self) -> None:
+        self.last_prompt = ""
+        self.calls = 0
+
+    async def generate(self, prompt: str) -> str:
+        self.calls += 1
+        self.last_prompt = prompt
+        return (
+            "**TSLA read:** Delivery and options chatter are driving the discussion.\n"
+            "**Sentiment:** Mixed with medium confidence.\n"
+            "Not financial advice."
+        )
+
+
 def make_snapshot() -> WsbSnapshot:
     return WsbSnapshot(
         subreddit="wallstreetbets",
@@ -255,6 +273,41 @@ async def test_ticker_service_collects_without_writing_snapshot_and_returns_brie
     assert collector.collected
     assert "**TSLA Social Momentum**" in brief
     assert not (tmp_path / "latest_wsb_snapshot.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_why_service_calls_llm_with_focused_ticker_prompt(tmp_path: Path) -> None:
+    snapshot = make_snapshot()
+    collector = FakeCollector(snapshot)
+    llm = FakeLlm()
+    service = MomentumAnalysisService(make_settings(tmp_path), collector=collector, llm_provider=llm)
+
+    brief = await service.why("tsla")
+
+    assert collector.collected
+    assert llm.calls == 1
+    assert brief.startswith("**Why TSLA?**")
+    assert "Delivery and options chatter" in brief
+    assert "Explain why TSLA" in llm.last_prompt
+    assert '"ticker": "TSLA"' in llm.last_prompt
+    assert "TSLA delivery catalyst thread" in llm.last_prompt
+    assert "NVDA" not in llm.last_prompt
+    assert not (tmp_path / "latest_wsb_snapshot.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_why_service_skips_llm_when_no_evidence_exists(tmp_path: Path) -> None:
+    snapshot = make_snapshot()
+    collector = FakeCollector(snapshot)
+    llm = FakeLlm()
+    service = MomentumAnalysisService(make_settings(tmp_path), collector=collector, llm_provider=llm)
+
+    brief = await service.why("NVDA")
+
+    assert collector.collected
+    assert llm.calls == 0
+    assert "**NVDA Social Momentum**" in brief
+    assert "is trending, but no qualifying Reddit posts" in brief
 
 
 @pytest.mark.asyncio

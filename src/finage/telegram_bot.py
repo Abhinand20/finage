@@ -115,6 +115,7 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("digest", self.digest))
         application.add_handler(CommandHandler("live", self.live))
         application.add_handler(CommandHandler("ticker", self.ticker))
+        application.add_handler(CommandHandler("why", self.why))
         application.add_handler(CommandHandler("movers", self.movers))
         application.run_polling()
 
@@ -123,7 +124,8 @@ class TelegramDigestBot:
             return
         await update.effective_message.reply_text(
             "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
-            "/ticker TSLA for focused ticker evidence, or /movers for changes versus the latest digest."
+            "/ticker TSLA for focused ticker evidence, /why TSLA for an explanation, "
+            "or /movers for changes versus the latest digest."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -134,6 +136,7 @@ class TelegramDigestBot:
             "/digest - scrape stock subreddits, generate a Gemini digest, and return it here.\n"
             "/live - run a fresh social momentum scan and return a compact market brief.\n"
             "/ticker <stock> - run a fresh scan and return focused evidence for one ticker.\n"
+            "/why <stock> - explain the strongest narratives behind one ticker using Gemini.\n"
             "/movers - compare a fresh scan against the latest saved digest snapshot."
         )
 
@@ -194,6 +197,32 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate ticker momentum brief")
             await update.effective_message.reply_text("Ticker scan failed. Check the Pi logs.")
+
+    async def why(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /why TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc).replace("/ticker", "/why"))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /why request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Analyzing why {symbol} is moving socially...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).why(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /why request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate why brief")
+            await update.effective_message.reply_text("Why analysis failed. Check the Pi logs.")
 
     async def movers(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):
