@@ -22,6 +22,9 @@ def test_web_search_is_disabled_without_exa_key() -> None:
     assert s.exa_api_key is None
     assert s.web_search_provider is None
     assert s.digest_web_search_enabled is False
+    assert s.web_search_num_results == 3
+    assert s.web_search_content_mode == "highlights"
+    assert s.web_search_timeout_seconds == 15
 
 
 def test_web_search_defaults_to_exa_when_api_key_is_present() -> None:
