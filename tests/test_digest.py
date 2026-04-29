@@ -30,6 +30,30 @@ class FakeLlm:
         return "WSB Momentum\n- TSLA: test digest.\nNot financial advice; WSB data is noisy."
 
 
+class FakeWebSearchProvider:
+    name = "fake-search"
+
+    def __init__(self, *, should_fail: bool = False) -> None:
+        self.should_fail = should_fail
+        self.queries: list[str] = []
+
+    async def search(self, query: str, options):
+        self.queries.append(query)
+        if self.should_fail:
+            raise RuntimeError("search failed")
+        return WebSearchResponse(
+            query=query,
+            provider=self.name,
+            results=[
+                WebSearchResult(
+                    title="Tesla web catalyst",
+                    url="https://example.com/tesla-web",
+                    highlights=["Tesla web context"],
+                )
+            ],
+        )
+
+
 def make_settings(tmp_path: Path) -> Settings:
     return Settings(
         reddit_client_id="reddit-id",
@@ -181,3 +205,42 @@ async def test_digest_service_includes_latest_digest_in_next_prompt(tmp_path: Pa
     await service.generate()
 
     assert "Yesterday: AMD led the digest." in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_digest_service_enriches_prompt_with_web_search(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.digest_web_search_enabled = True
+    llm = FakeLlm()
+    web_search = FakeWebSearchProvider()
+    service = DigestService(
+        settings,
+        collector=FakeCollector(make_snapshot()),
+        llm_provider=llm,
+        web_search_provider=web_search,
+    )
+
+    await service.generate()
+
+    assert web_search.queries == ["TSLA stock latest news earnings analyst catalyst"]
+    assert "Tesla web catalyst" in llm.last_prompt
+    assert "https://example.com/tesla-web" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_digest_service_continues_when_web_search_fails(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.digest_web_search_enabled = True
+    llm = FakeLlm()
+    service = DigestService(
+        settings,
+        collector=FakeCollector(make_snapshot()),
+        llm_provider=llm,
+        web_search_provider=FakeWebSearchProvider(should_fail=True),
+    )
+
+    result = await service.generate()
+
+    assert "TSLA" in result.digest
+    assert "TSLA catalyst thread" in llm.last_prompt
+    assert "web_search" not in llm.last_prompt

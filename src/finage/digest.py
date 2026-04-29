@@ -9,6 +9,12 @@ from finage.llm import LlmProvider, create_llm_provider
 from finage.models import DigestResult, WsbSnapshot
 from finage.prompting import build_digest_payload, render_digest_prompt
 from finage.settings import Settings
+from finage.web_search import (
+    WebSearchOptions,
+    WebSearchProvider,
+    WebSearchResponse,
+    create_web_search_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,10 @@ def build_digest_prompt(snapshot: WsbSnapshot) -> str:
     return render_digest_prompt(snapshot)
 
 
+def build_ticker_web_search_query(ticker: str) -> str:
+    return f"{ticker} stock latest news earnings analyst catalyst"
+
+
 class DigestService:
     def __init__(
         self,
@@ -30,11 +40,35 @@ class DigestService:
         collector: Collector | None = None,
         llm_provider: LlmProvider | None = None,
         artifact_store: ArtifactStore | None = None,
+        web_search_provider: WebSearchProvider | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.llm_provider = llm_provider or create_llm_provider(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
+        self.web_search_provider = web_search_provider or create_web_search_provider(settings)
+
+    async def _web_search_by_ticker(self, snapshot: WsbSnapshot) -> dict[str, WebSearchResponse]:
+        if not self.web_search_provider or not self.settings.digest_web_search_enabled:
+            return {}
+
+        options = WebSearchOptions(
+            num_results=self.settings.web_search_num_results,
+            content_mode=self.settings.web_search_content_mode,
+        )
+        results: dict[str, WebSearchResponse] = {}
+        for evidence in snapshot.ticker_evidence:
+            query = build_ticker_web_search_query(evidence.ticker)
+            try:
+                response = await self.web_search_provider.search(query, options)
+            except Exception:
+                logger.exception("Web search failed for ticker=%s query=%r", evidence.ticker, query)
+                continue
+
+            if response.results:
+                results[evidence.ticker] = response
+
+        return results
 
     async def generate(self) -> DigestResult:
         logger.info(
@@ -51,9 +85,12 @@ class DigestService:
             snapshot_path,
             len(snapshot.ticker_evidence),
         )
+        web_search_by_ticker = await self._web_search_by_ticker(snapshot)
+        logger.info("Web search enrichment complete for tickers=%s", len(web_search_by_ticker))
         prompt = render_digest_prompt(
             snapshot,
             previous_digest=previous_digest,
+            web_search_by_ticker=web_search_by_ticker,
             prompt_template_path=self.settings.digest_prompt_path,
         )
         logger.info("Rendered digest prompt with %s characters", len(prompt))
