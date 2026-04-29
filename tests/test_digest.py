@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from finage.digest import DigestService, build_digest_payload, build_digest_prompt
 from finage.models import DigestResult, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
@@ -154,6 +155,41 @@ def test_render_digest_prompt_supports_custom_template(tmp_path: Path) -> None:
     assert "Previous Digest JSON" in prompt
 
 
+def test_render_digest_prompt_supports_alternate_bundle() -> None:
+    prompt = render_digest_prompt(make_snapshot(), prompt_bundle="wsb_digest_new.md")
+
+    assert "market intelligence analyst" in prompt
+    assert "Watchlist Read" in prompt
+    assert "TSLA catalyst thread" in prompt
+
+
+def test_settings_digest_prompt_bundle_rejects_path_segments() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            reddit_client_id="reddit-id",
+            reddit_client_secret="reddit-secret",
+            telegram_bot_token="telegram-token",
+            telegram_allowed_ids=[123],
+            telegram_default_chat_id=123,
+            gemini_api_key="gemini-key",
+            digest_prompt_bundle="other/dir.md",
+        )
+
+
+def test_custom_prompt_path_ignores_bundle(tmp_path: Path) -> None:
+    prompt_path = tmp_path / "custom_prompt.md"
+    prompt_path.write_text("Only custom\n{evidence_json}", encoding="utf-8")
+
+    prompt = render_digest_prompt(
+        make_snapshot(),
+        prompt_template_path=prompt_path,
+        prompt_bundle="wsb_digest_new.md",
+    )
+
+    assert prompt.startswith("Only custom")
+    assert "market intelligence analyst" not in prompt
+
+
 def test_render_digest_prompt_includes_previous_digest() -> None:
     previous = DigestResult(provider="gemini", model="gemini-test", digest="Yesterday: TSLA persisted.")
 
@@ -215,6 +251,19 @@ async def test_digest_service_includes_latest_digest_in_next_prompt(tmp_path: Pa
     await service.generate()
 
     assert "Yesterday: AMD led the digest." in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_digest_service_respects_digest_prompt_bundle(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.digest_prompt_bundle = "wsb_digest_new.md"
+    llm = FakeLlm()
+
+    service = DigestService(settings, collector=FakeCollector(make_snapshot()), llm_provider=llm)
+
+    await service.generate()
+
+    assert "market intelligence analyst" in llm.last_prompt
 
 
 @pytest.mark.asyncio

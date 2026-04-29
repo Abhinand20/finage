@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_STOCK_SUBREDDITS = [
     "stocks",
@@ -79,6 +79,7 @@ class Settings(BaseModel):
 
     data_dir: Path = Path("data")
     digest_prompt_path: Path | None = None
+    digest_prompt_bundle: str = "wsb_digest.md"
 
     exa_api_key: str | None = None
     web_search_provider: Literal["exa"] | None = None
@@ -98,6 +99,16 @@ class Settings(BaseModel):
             and "digest_web_search_enabled" not in self.model_fields_set
         ):
             object.__setattr__(self, "digest_web_search_enabled", True)
+
+    @field_validator("digest_prompt_bundle")
+    @classmethod
+    def digest_prompt_bundle_is_bundled_filename(cls, v: str) -> str:
+        name = v.strip()
+        if not name.endswith(".md"):
+            raise ValueError("digest_prompt_bundle must be a .md filename")
+        if Path(name).name != name:
+            raise ValueError("digest_prompt_bundle must be a plain filename with no path segments")
+        return name
 
     @classmethod
     def from_env(cls, *, dotenv_path: str | Path | None = None) -> "Settings":
@@ -125,6 +136,7 @@ class Settings(BaseModel):
             "digest_prompt_path": Path(os.environ["DIGEST_PROMPT_PATH"])
             if os.getenv("DIGEST_PROMPT_PATH")
             else None,
+            "digest_prompt_bundle": os.getenv("DIGEST_PROMPT_BUNDLE", "wsb_digest.md"),
             "exa_api_key": exa_api_key,
             "web_search_provider": _optional_str(os.getenv("WEB_SEARCH_PROVIDER")),
             "web_search_num_results": _int_env("WEB_SEARCH_NUM_RESULTS", 3),

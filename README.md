@@ -35,7 +35,7 @@ Fill in:
 - `GEMINI_API_KEY` for Gemini Developer API.
 - Optional: `EXA_API_KEY` for per-ticker web search snippets in the digest prompt (see `.env.example` for related settings).
 
-The default stock subreddit list lives in `src/finage/settings.py` as `DEFAULT_STOCK_SUBREDDITS`. The default digest prompt lives at `src/finage/prompts/wsb_digest.md`. To experiment without editing package files, copy that file and set `DIGEST_PROMPT_PATH` to the copy. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped stock subreddit evidence.
+The default stock subreddit list lives in `src/finage/settings.py` as `DEFAULT_STOCK_SUBREDDITS`. The default digest prompt is the bundled file `wsb_digest.md` under `src/finage/prompts/`. Set `digest_prompt_bundle` in code or `DIGEST_PROMPT_BUNDLE` in the environment (e.g. `wsb_digest_new.md`) to pick another bundled template. To use an arbitrary file on disk, set `DIGEST_PROMPT_PATH`; that overrides the bundle. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped stock subreddit evidence.
 
 ## Usage
 

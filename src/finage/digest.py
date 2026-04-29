@@ -92,6 +92,7 @@ class DigestService:
             previous_digest=previous_digest,
             web_search_by_ticker=web_search_by_ticker,
             prompt_template_path=self.settings.digest_prompt_path,
+            prompt_bundle=self.settings.digest_prompt_bundle,
         )
         logger.info("Rendered digest prompt with %s characters", len(prompt))
         digest_text = await self.llm_provider.generate(prompt)
