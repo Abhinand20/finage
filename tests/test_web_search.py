@@ -50,3 +50,100 @@ def test_from_env_reads_optional_web_search_config(monkeypatch) -> None:
     assert s.web_search_num_results == 5
     assert s.web_search_content_mode == "text"
     assert s.web_search_timeout_seconds == 9
+
+
+from types import SimpleNamespace
+
+import pytest
+
+from finage.web_search import (
+    ExaWebSearchProvider,
+    WebSearchOptions,
+    _contents_for_mode,
+    _normalize_exa_result,
+    create_web_search_provider,
+)
+
+
+def test_create_web_search_provider_returns_none_when_disabled() -> None:
+    settings = make_settings(exa_api_key="exa-key", digest_web_search_enabled=False)
+
+    assert create_web_search_provider(settings) is None
+
+
+def test_create_web_search_provider_returns_exa_provider() -> None:
+    settings = make_settings(exa_api_key="exa-key", digest_web_search_enabled=True)
+
+    provider = create_web_search_provider(settings)
+
+    assert isinstance(provider, ExaWebSearchProvider)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("highlights", {"highlights": True}),
+        ("text", {"text": {"maxCharacters": 2000}}),
+        ("none", False),
+    ],
+)
+def test_contents_for_mode(mode: str, expected: dict | bool) -> None:
+    assert _contents_for_mode(mode) == expected
+
+
+def test_normalize_exa_result_handles_optional_fields() -> None:
+    raw = SimpleNamespace(
+        title="Tesla news",
+        url="https://example.com/tesla",
+        published_date="2026-04-28",
+        author=None,
+        highlights=["earnings catalyst"],
+        text="Long article text",
+        score=0.91,
+    )
+
+    result = _normalize_exa_result(raw)
+
+    assert result.title == "Tesla news"
+    assert result.url == "https://example.com/tesla"
+    assert result.published_date == "2026-04-28"
+    assert result.author is None
+    assert result.highlights == ["earnings catalyst"]
+    assert result.text == "Long article text"
+    assert result.score == 0.91
+
+
+@pytest.mark.asyncio
+async def test_exa_provider_search_normalizes_results() -> None:
+    class FakeExaClient:
+        async def search(self, query: str, **kwargs):
+            assert query == "TSLA stock latest news"
+            assert kwargs["num_results"] == 2
+            assert kwargs["type"] == "auto"
+            assert kwargs["contents"] == {"highlights": True}
+            return SimpleNamespace(
+                request_id="request-123",
+                results=[
+                    SimpleNamespace(
+                        title="Tesla catalyst",
+                        url="https://example.com/catalyst",
+                        published_date="2026-04-28",
+                        author="Reporter",
+                        highlights=["Tesla catalyst highlight"],
+                        text=None,
+                        score=0.8,
+                    )
+                ],
+            )
+
+    provider = ExaWebSearchProvider(api_key="exa-key", client=FakeExaClient())
+
+    response = await provider.search(
+        "TSLA stock latest news",
+        WebSearchOptions(num_results=2, content_mode="highlights"),
+    )
+
+    assert response.query == "TSLA stock latest news"
+    assert response.provider == "exa"
+    assert response.request_id == "request-123"
+    assert response.results[0].title == "Tesla catalyst"
