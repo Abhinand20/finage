@@ -86,24 +86,55 @@ class WsbCollector:
         self.settings = settings
 
     async def collect(self) -> WsbSnapshot:
+        logger.info(
+            "Starting WSB collection with trending source=%s, subreddits=%s, post_limit=%s",
+            self.settings.wsb_subreddit,
+            ",".join(self.settings.wsb_subreddits),
+            self.settings.wsb_post_limit,
+        )
         trending = await self.fetch_trending_tickers()
         candidate_tickers = [item.ticker for item in trending]
         posts_by_ticker: dict[str, list[PostEvidence]] = defaultdict(list)
+        logger.info(
+            "Fetched %s trending tickers from ApeWisdom: %s",
+            len(candidate_tickers),
+            ",".join(candidate_tickers),
+        )
 
         if not candidate_tickers:
             logger.warning("No trending tickers found from ApeWisdom")
-            return WsbSnapshot(subreddit=self.settings.wsb_subreddit, trending_tickers=[])
+            return WsbSnapshot(
+                subreddit=self.settings.wsb_subreddit,
+                subreddits=self.settings.wsb_subreddits,
+                trending_tickers=[],
+            )
 
         reddit = self._reddit_client()
         try:
-            subreddit = await reddit.subreddit(self.settings.wsb_subreddit)
-            async for submission in subreddit.hot(limit=self.settings.wsb_post_limit):
-                post = await self._post_evidence(submission, candidate_tickers)
-                if not post:
-                    continue
+            for subreddit_name in self.settings.wsb_subreddits:
+                scanned_count = 0
+                matched_count = 0
+                logger.info("Scanning subreddit r/%s", subreddit_name)
+                try:
+                    subreddit = await reddit.subreddit(subreddit_name)
+                    async for submission in subreddit.hot(limit=self.settings.wsb_post_limit):
+                        scanned_count += 1
+                        post = await self._post_evidence(submission, candidate_tickers, subreddit_name)
+                        if not post:
+                            continue
 
-                for ticker in post.mentioned_tickers:
-                    posts_by_ticker[ticker].append(post)
+                        matched_count += 1
+                        for ticker in post.mentioned_tickers:
+                            posts_by_ticker[ticker].append(post)
+                except Exception:
+                    logger.exception("Skipping subreddit %s after collection failure", subreddit_name)
+                else:
+                    logger.info(
+                        "Finished r/%s: scanned=%s, matched_posts=%s",
+                        subreddit_name,
+                        scanned_count,
+                        matched_count,
+                    )
         finally:
             await reddit.close()
 
@@ -117,14 +148,21 @@ class WsbCollector:
             for ticker, posts in posts_by_ticker.items()
         ]
         ticker_evidence.sort(key=lambda item: (item.trending.rank if item.trending else 999, -item.evidence_score))
+        logger.info(
+            "Collection complete: tickers_with_evidence=%s, total_matched_posts=%s",
+            len(ticker_evidence),
+            sum(len(item.posts) for item in ticker_evidence),
+        )
 
         return WsbSnapshot(
             subreddit=self.settings.wsb_subreddit,
+            subreddits=self.settings.wsb_subreddits,
             trending_tickers=trending,
             ticker_evidence=ticker_evidence,
         )
 
     async def fetch_trending_tickers(self) -> list[TrendingTicker]:
+        logger.info("Fetching trending tickers from ApeWisdom filter=%s", self.settings.wsb_subreddit)
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(APEWISDOM_URL.format(filter_name=self.settings.wsb_subreddit))
             response.raise_for_status()
@@ -132,6 +170,7 @@ class WsbCollector:
 
         results = payload.get("results", [])
         if not isinstance(results, list):
+            logger.warning("Unexpected ApeWisdom response shape: results is not a list")
             return []
 
         ranked: list[TrendingTicker] = []
@@ -159,13 +198,33 @@ class WsbCollector:
             requestor_kwargs={"session": _build_reddit_session()},
         )
 
-    async def _post_evidence(self, submission, candidate_tickers: list[str]) -> PostEvidence | None:
+    async def _post_evidence(
+        self, submission, candidate_tickers: list[str], subreddit_name: str
+    ) -> PostEvidence | None:
         flair = submission.link_flair_text or ""
         if flair in EXCLUDED_FLAIRS:
+            logger.debug(
+                "Skipping r/%s submission %s due to excluded flair=%s",
+                subreddit_name,
+                submission.id,
+                flair,
+            )
             return None
         if submission.score < self.settings.wsb_min_score:
+            logger.debug(
+                "Skipping r/%s submission %s due to low score=%s",
+                subreddit_name,
+                submission.id,
+                submission.score,
+            )
             return None
         if submission.num_comments < self.settings.wsb_min_comments:
+            logger.debug(
+                "Skipping r/%s submission %s due to low comments=%s",
+                subreddit_name,
+                submission.id,
+                submission.num_comments,
+            )
             return None
 
         content = f"{submission.title}\n{submission.selftext or ''}"
@@ -181,10 +240,16 @@ class WsbCollector:
             external_links.update(extract_external_links(comment.content))
 
         if not post_mentions:
+            logger.debug(
+                "Skipping r/%s submission %s because no candidate tickers were mentioned",
+                subreddit_name,
+                submission.id,
+            )
             return None
 
         return PostEvidence(
             id=submission.id,
+            subreddit=subreddit_name,
             url=f"https://www.reddit.com{submission.permalink}",
             title=submission.title,
             selftext=submission.selftext or "",

@@ -7,6 +7,18 @@ from typing import Literal
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+DEFAULT_STOCK_SUBREDDITS = [
+    "stocks",
+    "wallstreetbets",
+    "options",
+    "WallStreetbetsELITE",
+    "Wallstreetbetsnew",
+    "SPACs",
+    "investing",
+    "Daytrading",
+    "pennystocks",
+]
+
 
 def _parse_int_list(raw: str | None) -> list[int]:
     if not raw:
@@ -45,6 +57,7 @@ class Settings(BaseModel):
     gemini_model: str = "gemini-2.5-flash"
 
     wsb_subreddit: str = "wallstreetbets"
+    wsb_subreddits: list[str] = Field(default_factory=lambda: list(DEFAULT_STOCK_SUBREDDITS))
     wsb_post_limit: int = 75
     wsb_ticker_limit: int = 10
     wsb_min_score: int = 100

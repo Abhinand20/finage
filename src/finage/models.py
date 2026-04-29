@@ -21,6 +21,7 @@ class CommentEvidence(BaseModel):
 
 class PostEvidence(BaseModel):
     id: str
+    subreddit: str = ""
     url: str
     title: str
     selftext: str = ""
@@ -47,6 +48,7 @@ class TickerEvidence(BaseModel):
 class WsbSnapshot(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     subreddit: str
+    subreddits: list[str] = Field(default_factory=list)
     trending_tickers: list[TrendingTicker] = Field(default_factory=list)
     ticker_evidence: list[TickerEvidence] = Field(default_factory=list)
 

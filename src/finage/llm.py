@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Protocol
 
 from finage.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LlmProvider(Protocol):
@@ -25,6 +28,12 @@ class GeminiProvider:
         from google import genai
         from google.genai import types
 
+        logger.info(
+            "Calling Gemini model=%s prompt_chars=%s max_output_tokens=%s",
+            self.model,
+            len(prompt),
+            self.max_output_tokens,
+        )
         client = genai.Client(api_key=self.api_key)
         response = await client.aio.models.generate_content(
             model=self.model,
@@ -41,6 +50,7 @@ class GeminiProvider:
         text = (response.text or "").strip()
         if not text:
             raise RuntimeError("Gemini returned an empty digest")
+        logger.info("Gemini returned digest_chars=%s", len(text))
         return text
 
 

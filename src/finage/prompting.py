@@ -25,6 +25,7 @@ def build_digest_payload(snapshot: WsbSnapshot) -> dict:
         for post in evidence.posts[:3]:
             posts.append(
                 {
+                    "subreddit": post.subreddit,
                     "title": post.title,
                     "url": post.url,
                     "score": post.score,
@@ -57,6 +58,7 @@ def build_digest_payload(snapshot: WsbSnapshot) -> dict:
     return {
         "generated_at": snapshot.generated_at.isoformat(),
         "subreddit": snapshot.subreddit,
+        "subreddits": snapshot.subreddits or [snapshot.subreddit],
         "trending_tickers": [ticker.model_dump() for ticker in snapshot.trending_tickers],
         "ticker_evidence": tickers,
     }

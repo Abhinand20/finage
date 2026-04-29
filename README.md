@@ -1,11 +1,11 @@
 # Finage
 
-Finage is a small personal financial analyst MVP. Phase 1 generates a ticker-first WallStreetBets digest and delivers it through a restricted Telegram bot.
+Finage is a small personal financial analyst MVP. Phase 1 generates a ticker-first stock subreddit digest and delivers it through a restricted Telegram bot.
 
 ## What M1 Does
 
 - Pulls currently trending WSB tickers from ApeWisdom.
-- Scrapes recent `r/wallstreetbets` posts and top comments with Reddit API credentials.
+- Scrapes recent posts and top comments from the configured stock subreddit list with Reddit API credentials.
 - Keeps only evidence connected to the trending tickers.
 - Uses Gemini API to write a concise Telegram-friendly digest.
 - Saves the latest scrape and digest to local JSON files.
@@ -33,7 +33,7 @@ Fill in:
 - `TELEGRAM_DEFAULT_CHAT_ID` for scheduled sends.
 - `GEMINI_API_KEY` for Gemini Developer API.
 
-The default digest prompt lives at `src/finage/prompts/wsb_digest.md`. To experiment without editing package files, copy that file and set `DIGEST_PROMPT_PATH` to the copy. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped WSB evidence.
+The default stock subreddit list lives in `src/finage/settings.py` as `DEFAULT_STOCK_SUBREDDITS`. The default digest prompt lives at `src/finage/prompts/wsb_digest.md`. To experiment without editing package files, copy that file and set `DIGEST_PROMPT_PATH` to the copy. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped stock subreddit evidence.
 
 ## Usage
 

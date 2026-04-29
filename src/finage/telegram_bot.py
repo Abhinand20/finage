@@ -71,7 +71,10 @@ def markdown_to_telegram_html(text: str) -> str:
 
 
 async def send_text(bot: Bot, chat_id: int, text: str, *, parse_mode: str | None = None) -> None:
-    for chunk in chunk_text(text):
+    chunks = chunk_text(text)
+    logger.info("Sending Telegram message to chat_id=%s chunks=%s parse_mode=%s", chat_id, len(chunks), parse_mode)
+    for index, chunk in enumerate(chunks, start=1):
+        logger.debug("Sending Telegram chunk %s/%s chars=%s", index, len(chunks), len(chunk))
         await bot.send_message(
             chat_id=chat_id,
             text=chunk,
@@ -93,6 +96,7 @@ async def send_digest(settings: Settings, digest: DigestResult) -> None:
     if settings.telegram_default_chat_id is None:
         raise ValueError("TELEGRAM_DEFAULT_CHAT_ID is required for `finage digest send`")
 
+    logger.info("Sending generated digest to default Telegram chat_id=%s", settings.telegram_default_chat_id)
     async with Bot(token=settings.telegram_bot_token) as bot:
         await send_markdown_text(bot, settings.telegram_default_chat_id, digest.digest)
 
@@ -103,6 +107,7 @@ class TelegramDigestBot:
         self.allowed_ids = settings.telegram_allowed_id_set
 
     def run(self) -> None:
+        logger.info("Starting Telegram bot polling with allowed_ids_count=%s", len(self.allowed_ids))
         application = ApplicationBuilder().token(self.settings.telegram_bot_token).build()
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help))
@@ -127,10 +132,14 @@ class TelegramDigestBot:
         if not await self._guard(update, context):
             return
 
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /digest request from user_id=%s chat_id=%s", user_id, chat_id)
         await update.effective_message.reply_text("Generating WSB digest...")
         try:
             result = await DigestService(self.settings).generate()
             await send_markdown_text(context.bot, update.effective_chat.id, result.digest)
+            logger.info("Completed /digest request for chat_id=%s", chat_id)
         except Exception:
             logger.exception("Failed to generate digest")
             await update.effective_message.reply_text("Digest generation failed. Check the Pi logs.")
@@ -140,5 +149,11 @@ class TelegramDigestBot:
             return True
 
         if update.effective_chat:
+            user_id = update.effective_user.id if update.effective_user else None
+            logger.warning(
+                "Rejected unauthorized Telegram request from user_id=%s chat_id=%s",
+                user_id,
+                update.effective_chat.id,
+            )
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Unauthorized.")
         return False

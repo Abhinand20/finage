@@ -1,4 +1,4 @@
-Create a Telegram-friendly WallStreetBets momentum digest from this JSON evidence from scraped reddit posts.
+Create a Telegram-friendly stock subreddit momentum digest from this JSON evidence from scraped Reddit posts.
 
 Goal:
 Identify short-term retail momentum signals based on Reddit activity.

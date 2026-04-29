@@ -44,6 +44,7 @@ def make_settings(tmp_path: Path) -> Settings:
 def make_snapshot() -> WsbSnapshot:
     return WsbSnapshot(
         subreddit="wallstreetbets",
+        subreddits=["wallstreetbets", "stocks"],
         trending_tickers=[TrendingTicker(ticker="TSLA", rank=1, mentions=10, upvotes=50)],
         ticker_evidence=[
             TickerEvidence(
@@ -52,6 +53,7 @@ def make_snapshot() -> WsbSnapshot:
                 posts=[
                     PostEvidence(
                         id="abc",
+                        subreddit="stocks",
                         url="https://www.reddit.com/r/wallstreetbets/comments/abc",
                         title="TSLA catalyst thread",
                         score=500,
@@ -68,6 +70,8 @@ def test_build_digest_payload_keeps_ticker_evidence() -> None:
     payload = build_digest_payload(make_snapshot())
 
     assert payload["ticker_evidence"][0]["ticker"] == "TSLA"
+    assert payload["subreddits"] == ["wallstreetbets", "stocks"]
+    assert payload["ticker_evidence"][0]["posts"][0]["subreddit"] == "stocks"
     assert payload["ticker_evidence"][0]["posts"][0]["title"] == "TSLA catalyst thread"
 
 
