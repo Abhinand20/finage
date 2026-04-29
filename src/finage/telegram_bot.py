@@ -8,6 +8,7 @@ from telegram import Bot, Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+from finage.analysis import MomentumAnalysisService
 from finage.digest import DigestService
 from finage.models import DigestResult
 from finage.settings import Settings
@@ -112,6 +113,7 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help))
         application.add_handler(CommandHandler("digest", self.digest))
+        application.add_handler(CommandHandler("live", self.live))
         application.run_polling()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,7 +127,9 @@ class TelegramDigestBot:
         if not await self._guard(update, context):
             return
         await update.effective_message.reply_text(
-            "Commands:\n/digest - scrape WSB, generate a Gemini digest, and return it here."
+            "Commands:\n"
+            "/digest - scrape stock subreddits, generate a Gemini digest, and return it here.\n"
+            "/live - run a fresh social momentum scan and return a compact market brief."
         )
 
     async def digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,6 +147,22 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate digest")
             await update.effective_message.reply_text("Digest generation failed. Check the Pi logs.")
+
+    async def live(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /live request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Scanning live social momentum...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).live()
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /live request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate live momentum brief")
+            await update.effective_message.reply_text("Live scan failed. Check the Pi logs.")
 
     async def _guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         if is_authorized(update, self.allowed_ids):
