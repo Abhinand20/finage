@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -102,16 +103,19 @@ class ExaWebSearchProvider:
             options.num_results,
             options.content_mode,
         )
-        response = await self._client().search(
-            query,
-            num_results=options.num_results,
-            type=options.search_type,
-            contents=_contents_for_mode(
-                options.content_mode,
-                text_max_characters=options.text_max_characters,
+        response = await asyncio.wait_for(
+            self._client().search(
+                query,
+                num_results=options.num_results,
+                type=options.search_type,
+                contents=_contents_for_mode(
+                    options.content_mode,
+                    text_max_characters=options.text_max_characters,
+                ),
+                include_domains=options.include_domains,
+                exclude_domains=options.exclude_domains,
             ),
-            include_domains=options.include_domains,
-            exclude_domains=options.exclude_domains,
+            timeout=self.timeout_seconds,
         )
 
         results = [_normalize_exa_result(result) for result in getattr(response, "results", [])]
@@ -124,8 +128,6 @@ class ExaWebSearchProvider:
 
 
 def create_web_search_provider(settings: Settings) -> WebSearchProvider | None:
-    if not settings.digest_web_search_enabled:
-        return None
     if settings.web_search_provider is None:
         return None
     if settings.web_search_provider == "exa":

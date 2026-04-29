@@ -88,6 +88,8 @@ class Settings(BaseModel):
     digest_web_search_enabled: bool = False
 
     def model_post_init(self, __context: Any) -> None:
+        # Auto-derived values should not enter model_fields_set; that lets an
+        # explicit DIGEST_WEB_SEARCH_ENABLED=false override Exa auto-enable.
         if self.exa_api_key and self.web_search_provider is None:
             object.__setattr__(self, "web_search_provider", "exa")
         if (

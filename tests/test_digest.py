@@ -121,7 +121,8 @@ def test_build_digest_payload_includes_web_search_by_ticker() -> None:
 
     web_search = payload["ticker_evidence"][0]["web_search"]
     assert web_search["query"] == "TSLA stock latest news earnings analyst catalyst"
-    assert web_search["provider"] == "exa"
+    assert "provider" not in web_search
+    assert "request_id" not in web_search
     assert web_search["results"][0]["title"] == "Tesla earnings preview"
     assert web_search["results"][0]["url"] == "https://example.com/tesla"
 

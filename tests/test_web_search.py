@@ -1,6 +1,17 @@
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from finage.settings import Settings
+from finage.web_search import (
+    ExaWebSearchProvider,
+    WebSearchOptions,
+    _contents_for_mode,
+    _normalize_exa_result,
+    create_web_search_provider,
+)
 
 
 def make_settings(**overrides) -> Settings:
@@ -52,23 +63,10 @@ def test_from_env_reads_optional_web_search_config(monkeypatch) -> None:
     assert s.web_search_timeout_seconds == 9
 
 
-from types import SimpleNamespace
-
-import pytest
-
-from finage.web_search import (
-    ExaWebSearchProvider,
-    WebSearchOptions,
-    _contents_for_mode,
-    _normalize_exa_result,
-    create_web_search_provider,
-)
-
-
-def test_create_web_search_provider_returns_none_when_disabled() -> None:
+def test_create_web_search_provider_returns_exa_provider_when_digest_disabled() -> None:
     settings = make_settings(exa_api_key="exa-key", digest_web_search_enabled=False)
 
-    assert create_web_search_provider(settings) is None
+    assert isinstance(create_web_search_provider(settings), ExaWebSearchProvider)
 
 
 def test_create_web_search_provider_returns_exa_provider() -> None:
@@ -113,6 +111,19 @@ def test_normalize_exa_result_handles_optional_fields() -> None:
     assert result.score == 0.91
 
 
+def test_normalize_exa_result_supports_camel_case_published_date() -> None:
+    raw = SimpleNamespace(
+        title="Tesla news",
+        url="https://example.com/tesla",
+        publishedDate="2026-04-28",
+        highlights=[],
+    )
+
+    result = _normalize_exa_result(raw)
+
+    assert result.published_date == "2026-04-28"
+
+
 @pytest.mark.asyncio
 async def test_exa_provider_search_normalizes_results() -> None:
     class FakeExaClient:
@@ -147,3 +158,20 @@ async def test_exa_provider_search_normalizes_results() -> None:
     assert response.provider == "exa"
     assert response.request_id == "request-123"
     assert response.results[0].title == "Tesla catalyst"
+
+
+@pytest.mark.asyncio
+async def test_exa_provider_search_enforces_timeout() -> None:
+    class SlowExaClient:
+        async def search(self, query: str, **kwargs):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(results=[])
+
+    provider = ExaWebSearchProvider(
+        api_key="exa-key",
+        timeout_seconds=0.001,
+        client=SlowExaClient(),
+    )
+
+    with pytest.raises(TimeoutError):
+        await provider.search("TSLA stock latest news", WebSearchOptions())

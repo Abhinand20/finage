@@ -22,8 +22,6 @@ def _truncate(value: str, limit: int) -> str:
 def _web_search_payload(response: WebSearchResponse) -> dict:
     return {
         "query": response.query,
-        "provider": response.provider,
-        "request_id": response.request_id,
         "results": [
             {
                 "title": result.title,
