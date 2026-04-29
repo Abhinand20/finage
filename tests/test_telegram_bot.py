@@ -98,3 +98,61 @@ async def test_help_lists_live_command() -> None:
     await TelegramDigestBot(make_settings()).help(update, context)
 
     assert "/live" in message.replies[0]
+    assert "/ticker <stock>" in message.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_ticker_requires_one_symbol_argument() -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    await TelegramDigestBot(make_settings()).ticker(update, context)
+
+    assert message.replies == ["Usage: /ticker TSLA"]
+
+
+@pytest.mark.asyncio
+async def test_ticker_rejects_invalid_symbol_before_scanning() -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=["TSLA1"])
+
+    await TelegramDigestBot(make_settings()).ticker(update, context)
+
+    assert "Ticker must be 1-5 letters" in message.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_ticker_sends_focused_markdown_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def ticker(self, symbol: str) -> str:
+            assert symbol == "TSLA"
+            return "**TSLA Social Momentum**\n- focused brief"
+
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=["tsla"])
+
+    await TelegramDigestBot(make_settings()).ticker(update, context)
+
+    assert message.replies == ["Scanning social momentum for TSLA..."]
+    assert bot.messages[0]["chat_id"] == 999
+    assert "<b>TSLA Social Momentum</b>" in bot.messages[0]["text"]

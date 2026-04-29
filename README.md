@@ -60,6 +60,10 @@ Available bot commands:
 - `/start`
 - `/help`
 - `/digest`
+- `/live`
+- `/ticker <stock>`
+
+`/live` runs an ad hoc social-momentum scan without overwriting the latest digest artifacts. `/ticker <stock>` runs a fresh scan and returns focused evidence for one ticker, including ApeWisdom rank context, qualifying Reddit posts, subreddit breadth, comments, and external links when available.
 
 The bot rejects requests unless the effective Telegram user ID or chat ID is listed in `TELEGRAM_ALLOWED_IDS`.
 

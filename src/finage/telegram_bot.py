@@ -8,7 +8,7 @@ from telegram import Bot, Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-from finage.analysis import MomentumAnalysisService
+from finage.analysis import MomentumAnalysisService, normalize_ticker_symbol
 from finage.digest import DigestService
 from finage.models import DigestResult
 from finage.settings import Settings
@@ -114,13 +114,15 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("help", self.help))
         application.add_handler(CommandHandler("digest", self.digest))
         application.add_handler(CommandHandler("live", self.live))
+        application.add_handler(CommandHandler("ticker", self.ticker))
         application.run_polling()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):
             return
         await update.effective_message.reply_text(
-            "Finage is running. Use /digest to generate the latest WSB momentum digest."
+            "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
+            "or /ticker TSLA for focused ticker evidence."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -129,7 +131,8 @@ class TelegramDigestBot:
         await update.effective_message.reply_text(
             "Commands:\n"
             "/digest - scrape stock subreddits, generate a Gemini digest, and return it here.\n"
-            "/live - run a fresh social momentum scan and return a compact market brief."
+            "/live - run a fresh social momentum scan and return a compact market brief.\n"
+            "/ticker <stock> - run a fresh scan and return focused evidence for one ticker."
         )
 
     async def digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,6 +166,32 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate live momentum brief")
             await update.effective_message.reply_text("Live scan failed. Check the Pi logs.")
+
+    async def ticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /ticker TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /ticker request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Scanning social momentum for {symbol}...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).ticker(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /ticker request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate ticker momentum brief")
+            await update.effective_message.reply_text("Ticker scan failed. Check the Pi logs.")
 
     async def _guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         if is_authorized(update, self.allowed_ids):

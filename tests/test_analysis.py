@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from finage.analysis import MomentumAnalysisService, format_live_brief
+from finage.analysis import MomentumAnalysisService, format_live_brief, format_ticker_brief, normalize_ticker_symbol
 from finage.models import CommentEvidence, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.settings import Settings
 
@@ -47,9 +47,11 @@ def make_snapshot() -> WsbSnapshot:
                         subreddit="stocks",
                         url="https://www.reddit.com/r/stocks/comments/abc",
                         title="TSLA delivery catalyst thread",
+                        selftext="Delivery numbers and margin setup are driving the discussion.",
                         score=900,
                         num_comments=300,
                         mentioned_tickers=["TSLA"],
+                        external_links=["https://example.com/tsla-catalyst"],
                         top_comments=[
                             CommentEvidence(
                                 author="trader",
@@ -95,6 +97,46 @@ def test_format_live_brief_handles_empty_trending_list() -> None:
     assert "r/stocks" in brief
 
 
+def test_normalize_ticker_symbol_accepts_plain_and_cash_prefixed_symbols() -> None:
+    assert normalize_ticker_symbol("tsla") == "TSLA"
+    assert normalize_ticker_symbol("$nvda") == "NVDA"
+
+
+def test_normalize_ticker_symbol_rejects_invalid_symbols() -> None:
+    with pytest.raises(ValueError, match="Ticker must be 1-5 letters"):
+        normalize_ticker_symbol("TSLA1")
+
+
+def test_format_ticker_brief_includes_focused_evidence_card() -> None:
+    brief = format_ticker_brief(make_snapshot(), "tsla")
+
+    assert "**TSLA Social Momentum**" in brief
+    assert "ApeWisdom rank: #1" in brief
+    assert "Evidence score: 1,700" in brief
+    assert "Subreddit breadth: r/stocks x1, r/options x1" in brief
+    assert "Qualifying posts: 2" in brief
+    assert "TSLA delivery catalyst thread" in brief
+    assert "Summary: Delivery numbers" in brief
+    assert "Comment (50): Deliveries are the setup." in brief
+    assert "External links: https://example.com/tsla-catalyst" in brief
+
+
+def test_format_ticker_brief_explains_missing_evidence_for_trending_ticker() -> None:
+    brief = format_ticker_brief(make_snapshot(), "NVDA")
+
+    assert "**NVDA Social Momentum**" in brief
+    assert "is trending, but no qualifying Reddit posts" in brief
+    assert "Current top tickers: TSLA #1, NVDA #2" in brief
+
+
+def test_format_ticker_brief_explains_non_trending_ticker() -> None:
+    brief = format_ticker_brief(make_snapshot(), "AMD")
+
+    assert "**AMD Social Momentum**" in brief
+    assert "not in the current ApeWisdom trend list" in brief
+    assert "Finage did not collect targeted Reddit evidence" in brief
+
+
 @pytest.mark.asyncio
 async def test_live_service_collects_without_writing_snapshot_and_returns_brief(tmp_path: Path) -> None:
     snapshot = make_snapshot()
@@ -105,4 +147,17 @@ async def test_live_service_collects_without_writing_snapshot_and_returns_brief(
 
     assert collector.collected
     assert "**TSLA** #1" in brief
+    assert not (tmp_path / "latest_wsb_snapshot.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_ticker_service_collects_without_writing_snapshot_and_returns_brief(tmp_path: Path) -> None:
+    snapshot = make_snapshot()
+    collector = FakeCollector(snapshot)
+    service = MomentumAnalysisService(make_settings(tmp_path), collector=collector)
+
+    brief = await service.ticker("$tsla")
+
+    assert collector.collected
+    assert "**TSLA Social Momentum**" in brief
     assert not (tmp_path / "latest_wsb_snapshot.json").exists()

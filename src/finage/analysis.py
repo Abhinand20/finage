@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import Protocol
 
 from finage.collector import WsbCollector
-from finage.models import TickerEvidence, WsbSnapshot
+from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.settings import Settings
 
 logger = logging.getLogger(__name__)
+TICKER_RE = re.compile(r"^\$?[A-Za-z]{1,5}$")
 
 
 class Collector(Protocol):
@@ -18,6 +20,24 @@ class Collector(Protocol):
 
 def _format_int(value: int) -> str:
     return f"{value:,}"
+
+
+def normalize_ticker_symbol(value: str) -> str:
+    symbol = value.strip().upper()
+    if symbol.startswith("$"):
+        symbol = symbol[1:]
+
+    if not symbol or not TICKER_RE.fullmatch(value.strip()):
+        raise ValueError("Ticker must be 1-5 letters, for example `/ticker TSLA`.")
+
+    return symbol
+
+
+def _truncate(value: str, limit: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
 
 
 def _subreddit_summary(evidence: TickerEvidence) -> str:
@@ -36,6 +56,96 @@ def _top_post_summary(evidence: TickerEvidence) -> str:
     post = evidence.posts[0]
     source = f"r/{post.subreddit}" if post.subreddit else "unknown subreddit"
     return f"{post.title} ({source}, {_format_int(post.score)} score, {_format_int(post.num_comments)} comments)"
+
+
+def _top_trending_context(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
+    if not snapshot.trending_tickers:
+        return "No current ApeWisdom tickers were available."
+
+    tickers = ", ".join(f"{item.ticker} #{item.rank}" for item in snapshot.trending_tickers[:limit])
+    return f"Current top tickers: {tickers}."
+
+
+def _format_trending_context(trending: TrendingTicker | None) -> str:
+    if trending is None:
+        return "ApeWisdom rank: not in the current trend list."
+
+    return (
+        f"ApeWisdom rank: #{trending.rank}; "
+        f"mentions: {_format_int(trending.mentions)}; upvotes: {_format_int(trending.upvotes)}."
+    )
+
+
+def _format_post_detail(post: PostEvidence) -> str:
+    source = f"r/{post.subreddit}" if post.subreddit else "unknown subreddit"
+    parts = [
+        f"- {post.title} ({source}, {_format_int(post.score)} score, {_format_int(post.num_comments)} comments)",
+        f"  {post.url}",
+    ]
+
+    if post.selftext:
+        parts.append(f"  Summary: {_truncate(post.selftext, 220)}")
+
+    for comment in post.top_comments[:2]:
+        parts.append(f"  Comment ({_format_int(comment.score)}): {_truncate(comment.content, 180)}")
+
+    if post.external_links:
+        parts.append(f"  External links: {', '.join(post.external_links[:3])}")
+
+    return "\n".join(parts)
+
+
+def format_ticker_brief(snapshot: WsbSnapshot, symbol: str) -> str:
+    """Build a focused Telegram-ready evidence card for a single ticker."""
+
+    ticker = normalize_ticker_symbol(symbol)
+    trending_by_ticker = {item.ticker: item for item in snapshot.trending_tickers}
+    evidence_by_ticker = {item.ticker: item for item in snapshot.ticker_evidence}
+    trending = trending_by_ticker.get(ticker)
+    evidence = evidence_by_ticker.get(ticker)
+    source_scope = ", ".join(f"r/{name}" for name in (snapshot.subreddits or [snapshot.subreddit]))
+
+    lines = [
+        f"**{ticker} Social Momentum**",
+        f"Generated: {snapshot.generated_at:%Y-%m-%d %H:%M UTC}",
+        f"Sources: ApeWisdom `{snapshot.subreddit}` trend list + {source_scope}",
+        _format_trending_context(trending),
+        "",
+    ]
+
+    if evidence is None:
+        if trending is None:
+            lines.extend(
+                [
+                    f"**Read:** {ticker} is not in the current ApeWisdom trend list, so Finage did not collect targeted Reddit evidence for it in this scan.",
+                    _top_trending_context(snapshot),
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"**Read:** {ticker} is trending, but no qualifying Reddit posts passed the configured score/comment filters in this scan.",
+                    _top_trending_context(snapshot),
+                ]
+            )
+        lines.extend(["", "Not financial advice; this is social-media evidence, not live price action."])
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"Evidence score: {_format_int(evidence.evidence_score)}",
+            f"Subreddit breadth: {_subreddit_summary(evidence)}",
+            f"Qualifying posts: {len(evidence.posts)}",
+            "",
+            "**Top Evidence**",
+        ]
+    )
+
+    for post in evidence.posts[:3]:
+        lines.append(_format_post_detail(post))
+
+    lines.extend(["", "Not financial advice; this is social-media evidence, not live price action."])
+    return "\n".join(lines)
 
 
 def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
@@ -122,3 +232,15 @@ class MomentumAnalysisService:
             len(snapshot.ticker_evidence),
         )
         return format_live_brief(snapshot)
+
+    async def ticker(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        logger.info("Starting ticker momentum scan for ticker=%s", ticker)
+        snapshot = await self.collector.collect()
+        logger.info(
+            "Ticker momentum scan complete: ticker=%s trending=%s evidence_tickers=%s",
+            ticker,
+            len(snapshot.trending_tickers),
+            len(snapshot.ticker_evidence),
+        )
+        return format_ticker_brief(snapshot, ticker)
