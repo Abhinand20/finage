@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpraw>=7.8.1",
+    "exa-py>=2.12.1",
     "google-genai>=1.0.0",
     "httpx>=0.28.1",
     "pydantic>=2.11.0",
