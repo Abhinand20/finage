@@ -6,6 +6,7 @@ from finage.digest import DigestService, build_digest_payload, build_digest_prom
 from finage.models import DigestResult, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.prompting import render_digest_prompt
 from finage.settings import Settings
+from finage.web_search import WebSearchResponse, WebSearchResult
 
 
 class FakeCollector:
@@ -75,6 +76,32 @@ def test_build_digest_payload_keeps_ticker_evidence() -> None:
     assert payload["ticker_evidence"][0]["posts"][0]["title"] == "TSLA catalyst thread"
 
 
+def test_build_digest_payload_includes_web_search_by_ticker() -> None:
+    search_response = WebSearchResponse(
+        query="TSLA stock latest news earnings analyst catalyst",
+        provider="exa",
+        request_id="request-123",
+        results=[
+            WebSearchResult(
+                title="Tesla earnings preview",
+                url="https://example.com/tesla",
+                published_date="2026-04-28",
+                author="Reporter",
+                highlights=["Tesla earnings are due this week."],
+                score=0.9,
+            )
+        ],
+    )
+
+    payload = build_digest_payload(make_snapshot(), web_search_by_ticker={"TSLA": search_response})
+
+    web_search = payload["ticker_evidence"][0]["web_search"]
+    assert web_search["query"] == "TSLA stock latest news earnings analyst catalyst"
+    assert web_search["provider"] == "exa"
+    assert web_search["results"][0]["title"] == "Tesla earnings preview"
+    assert web_search["results"][0]["url"] == "https://example.com/tesla"
+
+
 def test_build_digest_prompt_includes_required_caveat() -> None:
     prompt = build_digest_prompt(make_snapshot())
 
@@ -100,6 +127,29 @@ def test_render_digest_prompt_includes_previous_digest() -> None:
 
     assert "Previous Digest JSON" in prompt
     assert "Yesterday: TSLA persisted." in prompt
+
+
+def test_render_digest_prompt_includes_web_search_context() -> None:
+    search_response = WebSearchResponse(
+        query="TSLA stock latest news earnings analyst catalyst",
+        provider="exa",
+        results=[
+            WebSearchResult(
+                title="Tesla catalyst",
+                url="https://example.com/catalyst",
+                highlights=["Tesla announced a catalyst."],
+            )
+        ],
+    )
+
+    prompt = render_digest_prompt(
+        make_snapshot(),
+        web_search_by_ticker={"TSLA": search_response},
+    )
+
+    assert '"web_search"' in prompt
+    assert "Tesla catalyst" in prompt
+    assert "https://example.com/catalyst" in prompt
 
 
 @pytest.mark.asyncio
