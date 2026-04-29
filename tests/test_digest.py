@@ -133,6 +133,15 @@ def test_build_digest_prompt_includes_required_caveat() -> None:
     assert "TSLA catalyst thread" in prompt
 
 
+def test_default_digest_prompt_describes_web_search_evidence() -> None:
+    prompt = build_digest_prompt(make_snapshot())
+
+    assert "Web search evidence may show recent news" in prompt
+    assert "Use web search to ground catalysts" in prompt
+    assert "This is market intelligence, not financial advice." in prompt
+    assert "A brief \"watchlist read\"" in prompt
+
+
 def test_render_digest_prompt_supports_custom_template(tmp_path: Path) -> None:
     prompt_path = tmp_path / "custom_prompt.md"
     prompt_path.write_text("Custom prompt\n{evidence_json}", encoding="utf-8")
