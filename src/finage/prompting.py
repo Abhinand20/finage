@@ -5,6 +5,7 @@ from importlib import resources
 from pathlib import Path
 
 from finage.models import DigestResult, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.web_search import WebSearchResponse
 
 DEFAULT_DIGEST_PROMPT = "wsb_digest.md"
 EVIDENCE_PLACEHOLDER = "{evidence_json}"
@@ -18,7 +19,29 @@ def _truncate(value: str, limit: int) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
-def build_digest_payload(snapshot: WsbSnapshot) -> dict:
+def _web_search_payload(response: WebSearchResponse) -> dict:
+    return {
+        "query": response.query,
+        "results": [
+            {
+                "title": result.title,
+                "url": result.url,
+                "published_date": result.published_date,
+                "author": result.author,
+                "highlights": result.highlights,
+                "text": _truncate(result.text, 1200) if result.text else None,
+                "score": result.score,
+            }
+            for result in response.results[:5]
+        ],
+    }
+
+
+def build_digest_payload(
+    snapshot: WsbSnapshot,
+    *,
+    web_search_by_ticker: dict[str, WebSearchResponse] | None = None,
+) -> dict:
     tickers = []
     for evidence in snapshot.ticker_evidence:
         posts = []
@@ -45,15 +68,16 @@ def build_digest_payload(snapshot: WsbSnapshot) -> dict:
                 }
             )
 
-        tickers.append(
-            {
-                "ticker": evidence.ticker,
-                "apewisdom_rank": evidence.trending.rank if evidence.trending else None,
-                "apewisdom_mentions": evidence.trending.mentions if evidence.trending else 0,
-                "apewisdom_upvotes": evidence.trending.upvotes if evidence.trending else 0,
-                "posts": posts,
-            }
-        )
+        ticker_payload = {
+            "ticker": evidence.ticker,
+            "apewisdom_rank": evidence.trending.rank if evidence.trending else None,
+            "apewisdom_mentions": evidence.trending.mentions if evidence.trending else 0,
+            "apewisdom_upvotes": evidence.trending.upvotes if evidence.trending else 0,
+            "posts": posts,
+        }
+        if web_search_by_ticker and evidence.ticker in web_search_by_ticker:
+            ticker_payload["web_search"] = _web_search_payload(web_search_by_ticker[evidence.ticker])
+        tickers.append(ticker_payload)
 
     return {
         "generated_at": snapshot.generated_at.isoformat(),
@@ -139,11 +163,15 @@ Evidence JSON:
 """
 
 
-def load_digest_prompt_template(prompt_template_path: Path | None = None) -> str:
+def load_digest_prompt_template(
+    prompt_template_path: Path | None = None,
+    *,
+    prompt_bundle: str = DEFAULT_DIGEST_PROMPT,
+) -> str:
     if prompt_template_path is not None:
         return prompt_template_path.read_text(encoding="utf-8")
 
-    return resources.files("finage.prompts").joinpath(DEFAULT_DIGEST_PROMPT).read_text(encoding="utf-8")
+    return resources.files("finage.prompts").joinpath(prompt_bundle).read_text(encoding="utf-8")
 
 
 def build_previous_digest_payload(previous_digest: DigestResult | None) -> dict:
@@ -163,12 +191,14 @@ def render_digest_prompt(
     snapshot: WsbSnapshot,
     *,
     previous_digest: DigestResult | None = None,
+    web_search_by_ticker: dict[str, WebSearchResponse] | None = None,
     prompt_template_path: Path | None = None,
+    prompt_bundle: str = DEFAULT_DIGEST_PROMPT,
 ) -> str:
-    payload = build_digest_payload(snapshot)
+    payload = build_digest_payload(snapshot, web_search_by_ticker=web_search_by_ticker)
     evidence_json = json.dumps(payload, indent=2, default=str)
     previous_digest_json = json.dumps(build_previous_digest_payload(previous_digest), indent=2, default=str)
-    template = load_digest_prompt_template(prompt_template_path)
+    template = load_digest_prompt_template(prompt_template_path, prompt_bundle=prompt_bundle)
     if EVIDENCE_PLACEHOLDER not in template:
         raise ValueError(f"Digest prompt template must include {EVIDENCE_PLACEHOLDER}")
 

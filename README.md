@@ -4,10 +4,11 @@ Finage is a small personal financial analyst MVP. Phase 1 generates a ticker-fir
 
 ## What M1 Does
 
-- Pulls currently trending WSB tickers from ApeWisdom.
+- Pulls currently trending tickers from ApeWisdom for each configured stock subreddit filter.
 - Scrapes recent posts and top comments from the configured stock subreddit list with Reddit API credentials.
 - Keeps only evidence connected to the trending tickers.
 - Uses Gemini API to write a concise Telegram-friendly digest.
+- Optionally enriches each digest with recent web context via [Exa](https://exa.ai) when `EXA_API_KEY` is set (see `.env.example`).
 - Saves the latest scrape and digest to local JSON files.
 - Supports an on-demand `/digest` Telegram command and a CLI command suitable for cron or systemd timers.
 
@@ -32,8 +33,9 @@ Fill in:
 - `TELEGRAM_ALLOWED_IDS` with your numeric Telegram user ID and/or chat ID.
 - `TELEGRAM_DEFAULT_CHAT_ID` for scheduled sends.
 - `GEMINI_API_KEY` for Gemini Developer API.
+- Optional: `EXA_API_KEY` for per-ticker web search snippets in the digest prompt (see `.env.example` for related settings).
 
-The default stock subreddit list lives in `src/finage/settings.py` as `DEFAULT_STOCK_SUBREDDITS`. The default digest prompt lives at `src/finage/prompts/wsb_digest.md`. To experiment without editing package files, copy that file and set `DIGEST_PROMPT_PATH` to the copy. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped stock subreddit evidence.
+The default stock subreddit list lives in `src/finage/settings.py` as `DEFAULT_STOCK_SUBREDDITS`. The default digest prompt is the bundled file `wsb_digest.md` under `src/finage/prompts/`. Set `digest_prompt_bundle` in code or `DIGEST_PROMPT_BUNDLE` in the environment (e.g. `wsb_digest_new.md`) to pick another bundled template. To use an arbitrary file on disk, set `DIGEST_PROMPT_PATH`; that overrides the bundle. Custom prompt templates must include `{evidence_json}`, which is replaced with the scraped stock subreddit evidence.
 
 ## Usage
 

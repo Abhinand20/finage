@@ -86,9 +86,10 @@ class WsbCollector:
         self.settings = settings
 
     async def collect(self) -> WsbSnapshot:
+        filter_names = ", ".join(self._apewisdom_filter_names())
         logger.info(
-            "Starting WSB collection with trending source=%s, subreddits=%s, post_limit=%s",
-            self.settings.wsb_subreddit,
+            "Starting WSB collection with apewisdom_filters=%s, subreddits=%s, post_limit=%s",
+            filter_names,
             ",".join(self.settings.wsb_subreddits),
             self.settings.wsb_post_limit,
         )
@@ -162,33 +163,59 @@ class WsbCollector:
         )
 
     async def fetch_trending_tickers(self) -> list[TrendingTicker]:
-        logger.info("Fetching trending tickers from ApeWisdom filter=%s", self.settings.wsb_subreddit)
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(APEWISDOM_URL.format(filter_name=self.settings.wsb_subreddit))
-            response.raise_for_status()
-            payload = response.json()
+        filter_names = self._apewisdom_filter_names()
+        logger.info("Fetching trending tickers from ApeWisdom filters=%s", ",".join(filter_names))
 
-        results = payload.get("results", [])
-        if not isinstance(results, list):
-            logger.warning("Unexpected ApeWisdom response shape: results is not a list")
-            return []
+        merged: dict[str, tuple[int, int]] = {}
+        async with httpx.AsyncClient(timeout=20) as client:
+            for filter_name in filter_names:
+                try:
+                    raw_rows = await self._fetch_apewisdom_results_for_filter(client, filter_name)
+                except Exception:
+                    logger.exception("Skipping ApeWisdom filter %s after fetch failure", filter_name)
+                    continue
+
+                for item in raw_rows:
+                    ticker = str(item.get("ticker", "")).upper().strip()
+                    if not ticker:
+                        continue
+                    mentions = int(item.get("mentions") or 0)
+                    upvotes = int(item.get("upvotes") or 0)
+                    prev = merged.get(ticker, (0, 0))
+                    merged[ticker] = (prev[0] + mentions, prev[1] + upvotes)
+
+        sorted_items = sorted(merged.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))[
+            : self.settings.wsb_ticker_limit
+        ]
 
         ranked: list[TrendingTicker] = []
-        for index, item in enumerate(results[: self.settings.wsb_ticker_limit], start=1):
-            ticker = str(item.get("ticker", "")).upper().strip()
-            if not ticker:
-                continue
-
+        for index, (ticker, (mentions, upvotes)) in enumerate(sorted_items, start=1):
             ranked.append(
-                TrendingTicker(
-                    ticker=ticker,
-                    rank=index,
-                    mentions=int(item.get("mentions") or 0),
-                    upvotes=int(item.get("upvotes") or 0),
-                )
+                TrendingTicker(ticker=ticker, rank=index, mentions=mentions, upvotes=upvotes),
             )
 
         return ranked
+
+    def _apewisdom_filter_names(self) -> list[str]:
+        names = self.settings.wsb_subreddits
+        if not names:
+            names = [self.settings.wsb_subreddit]
+        return list(dict.fromkeys(names))
+
+    async def _fetch_apewisdom_results_for_filter(
+        self, client: httpx.AsyncClient, filter_name: str
+    ) -> list[dict]:
+        response = await client.get(APEWISDOM_URL.format(filter_name=filter_name))
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results", [])
+        if not isinstance(results, list):
+            logger.warning(
+                "Unexpected ApeWisdom response shape for filter=%s: results is not a list",
+                filter_name,
+            )
+            return []
+        return results
 
     def _reddit_client(self) -> asyncpraw.Reddit:
         return asyncpraw.Reddit(
