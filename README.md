@@ -64,8 +64,9 @@ Available bot commands:
 - `/ticker <stock>`
 - `/why <stock>`
 - `/movers`
+- `/health`
 
-`/live` runs an ad hoc social-momentum scan without overwriting the latest digest artifacts. `/ticker <stock>` runs a fresh scan and returns focused evidence for one ticker, including ApeWisdom rank context, qualifying Reddit posts, subreddit breadth, comments, and external links when available. `/why <stock>` runs a fresh scan and asks Gemini for a concise explanation of the ticker's narrative, sentiment, catalysts, evidence strength, and uncertainty. `/movers` runs a fresh scan and compares it against the latest saved digest snapshot without overwriting artifacts.
+`/live` runs an ad hoc social-momentum scan without overwriting the latest digest artifacts. `/ticker <stock>` runs a fresh scan and returns focused evidence for one ticker, including ApeWisdom rank context, qualifying Reddit posts, subreddit breadth, comments, and external links when available. `/why <stock>` runs a fresh scan and asks Gemini for a concise explanation of the ticker's narrative, sentiment, catalysts, evidence strength, and uncertainty. `/movers` runs a fresh scan and compares it against the latest saved digest snapshot without overwriting artifacts. `/health` checks configuration, latest artifacts, the data directory, and ApeWisdom reachability.
 
 The bot rejects requests unless the effective Telegram user ID or chat ID is listed in `TELEGRAM_ALLOWED_IDS`.
 

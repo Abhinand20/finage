@@ -101,6 +101,7 @@ async def test_help_lists_live_command() -> None:
     assert "/ticker <stock>" in message.replies[0]
     assert "/why <stock>" in message.replies[0]
     assert "/movers" in message.replies[0]
+    assert "/health" in message.replies[0]
 
 
 @pytest.mark.asyncio
@@ -241,3 +242,29 @@ async def test_movers_sends_markdown_brief(monkeypatch: pytest.MonkeyPatch) -> N
     assert message.replies == ["Scanning social momentum movers..."]
     assert bot.messages[0]["chat_id"] == 999
     assert "<b>Social Momentum Movers</b>" in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_health_sends_markdown_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def health(self) -> str:
+            return "**Finage Health**\nOverall: OK"
+
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=[])
+
+    await TelegramDigestBot(make_settings()).health(update, context)
+
+    assert message.replies == ["Checking Finage health..."]
+    assert bot.messages[0]["chat_id"] == 999
+    assert "<b>Finage Health</b>" in bot.messages[0]["text"]

@@ -4,7 +4,9 @@ import pytest
 
 from finage.artifacts import ArtifactStore
 from finage.analysis import (
+    HealthCheck,
     MomentumAnalysisService,
+    format_health_report,
     format_live_brief,
     format_movers_brief,
     format_ticker_brief,
@@ -22,6 +24,17 @@ class FakeCollector:
     async def collect(self) -> WsbSnapshot:
         self.collected = True
         return self.snapshot
+
+
+class FakeHealthCollector(FakeCollector):
+    def __init__(self, snapshot: WsbSnapshot, trending: list[TrendingTicker] | None = None):
+        super().__init__(snapshot)
+        self.trending = trending or []
+        self.fetched_trending = False
+
+    async def fetch_trending_tickers(self) -> list[TrendingTicker]:
+        self.fetched_trending = True
+        return self.trending
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -249,6 +262,20 @@ def test_format_movers_brief_explains_missing_baseline() -> None:
     assert "Current top tickers: TSLA #1, NVDA #2" in brief
 
 
+def test_format_health_report_sets_overall_status_from_checks() -> None:
+    report = format_health_report(
+        [
+            HealthCheck("OK", "A", "healthy"),
+            HealthCheck("WARN", "B", "needs attention"),
+        ]
+    )
+
+    assert "**Finage Health**" in report
+    assert "Overall: WARN" in report
+    assert "`OK` **A**: healthy" in report
+    assert "`WARN` **B**: needs attention" in report
+
+
 @pytest.mark.asyncio
 async def test_live_service_collects_without_writing_snapshot_and_returns_brief(tmp_path: Path) -> None:
     snapshot = make_snapshot()
@@ -325,3 +352,39 @@ async def test_movers_service_compares_without_overwriting_latest_snapshot(tmp_p
     assert "**Social Momentum Movers**" in brief
     assert "**NVDA** entered at #2" in brief
     assert snapshot_path.read_text(encoding="utf-8") == original_snapshot_json
+
+
+@pytest.mark.asyncio
+async def test_health_service_reports_ok_and_warn_states(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    store.write_snapshot(make_snapshot())
+    collector = FakeHealthCollector(
+        make_snapshot(),
+        trending=[TrendingTicker(ticker="TSLA", rank=1, mentions=100, upvotes=200)],
+    )
+    service = MomentumAnalysisService(make_settings(tmp_path), collector=collector)
+
+    report = await service.health()
+
+    assert collector.fetched_trending
+    assert "Overall: WARN" in report
+    assert "`OK` **Telegram allowlist**" in report
+    assert "`OK` **Latest snapshot**" in report
+    assert "`WARN` **Latest digest**" in report
+    assert "`OK` **ApeWisdom**: Fetched 1 trending tickers" in report
+
+
+@pytest.mark.asyncio
+async def test_health_service_reports_failures_without_network_call_requirements(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.telegram_allowed_ids = []
+    settings.wsb_subreddits = []
+    collector = FakeCollector(make_snapshot())
+    service = MomentumAnalysisService(settings, collector=collector)
+
+    report = await service.health()
+
+    assert "Overall: FAIL" in report
+    assert "`FAIL` **Telegram allowlist**" in report
+    assert "`FAIL` **Collection settings**" in report
+    assert "`WARN` **ApeWisdom**: Trending check skipped for injected collector" in report

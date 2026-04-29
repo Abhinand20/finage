@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import Counter
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
-from finage.artifacts import ArtifactStore
+from finage.artifacts import ArtifactStore, LATEST_DIGEST_FILENAME, LATEST_SNAPSHOT_FILENAME
 from finage.collector import WsbCollector
 from finage.llm import LlmProvider, create_llm_provider
 from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
@@ -19,6 +22,13 @@ TICKER_RE = re.compile(r"^\$?[A-Za-z]{1,5}$")
 class Collector(Protocol):
     async def collect(self) -> WsbSnapshot:
         ...
+
+
+@dataclass(frozen=True)
+class HealthCheck:
+    status: str
+    name: str
+    detail: str
 
 
 def _format_int(value: int) -> str:
@@ -178,6 +188,38 @@ def _format_rank_delta(current_rank: int, previous_rank: int) -> str:
     if delta < 0:
         return f"down {abs(delta)} spots"
     return "unchanged"
+
+
+def _format_artifact_age(generated_at: datetime) -> str:
+    now = datetime.now(UTC)
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=UTC)
+    age = now - generated_at
+    total_minutes = max(0, int(age.total_seconds() // 60))
+    if total_minutes < 60:
+        return f"{total_minutes}m old"
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours}h {minutes}m old"
+
+
+def format_health_report(checks: list[HealthCheck]) -> str:
+    counts = Counter(check.status for check in checks)
+    if counts.get("FAIL"):
+        overall = "FAIL"
+    elif counts.get("WARN"):
+        overall = "WARN"
+    else:
+        overall = "OK"
+
+    lines = [
+        "**Finage Health**",
+        f"Overall: {overall}",
+        "",
+    ]
+    for check in checks:
+        lines.append(f"- `{check.status}` **{check.name}**: {check.detail}")
+    return "\n".join(lines)
 
 
 def format_movers_brief(current: WsbSnapshot, previous: WsbSnapshot | None, *, limit: int = 5) -> str:
@@ -462,3 +504,122 @@ class MomentumAnalysisService:
         logger.info("Rendered why prompt for ticker=%s chars=%s", ticker, len(prompt))
         explanation = await self.llm_provider.generate(prompt)
         return f"**Why {ticker}?**\n{explanation.strip()}"
+
+    async def health(self) -> str:
+        logger.info("Starting health check")
+        checks: list[HealthCheck] = []
+
+        checks.append(
+            HealthCheck(
+                "OK" if self.settings.telegram_allowed_ids else "FAIL",
+                "Telegram allowlist",
+                f"{len(self.settings.telegram_allowed_ids)} allowed IDs configured"
+                if self.settings.telegram_allowed_ids
+                else "TELEGRAM_ALLOWED_IDS is empty; bot will reject all users",
+            )
+        )
+        checks.append(
+            HealthCheck(
+                "OK" if self.settings.telegram_default_chat_id is not None else "WARN",
+                "Default chat",
+                f"TELEGRAM_DEFAULT_CHAT_ID={self.settings.telegram_default_chat_id}"
+                if self.settings.telegram_default_chat_id is not None
+                else "Missing TELEGRAM_DEFAULT_CHAT_ID; scheduled sends will fail",
+            )
+        )
+        checks.append(
+            HealthCheck(
+                "OK",
+                "LLM",
+                f"provider={self.settings.llm_provider}, model={self.settings.gemini_model}, key configured",
+            )
+        )
+        checks.append(
+            HealthCheck(
+                "OK" if self.settings.wsb_subreddits else "FAIL",
+                "Collection settings",
+                (
+                    f"ApeWisdom filter={self.settings.wsb_subreddit}; "
+                    f"{len(self.settings.wsb_subreddits)} subreddits; "
+                    f"post_limit={self.settings.wsb_post_limit}; ticker_limit={self.settings.wsb_ticker_limit}; "
+                    f"min_score={self.settings.wsb_min_score}; min_comments={self.settings.wsb_min_comments}"
+                ),
+            )
+        )
+
+        data_dir = self.settings.data_dir
+        if data_dir.exists():
+            checks.append(
+                HealthCheck(
+                    "OK" if data_dir.is_dir() and os.access(data_dir, os.R_OK | os.W_OK) else "FAIL",
+                    "Data directory",
+                    f"{data_dir} exists"
+                    if data_dir.is_dir() and os.access(data_dir, os.R_OK | os.W_OK)
+                    else f"{data_dir} is not readable/writable",
+                )
+            )
+        else:
+            parent = data_dir.parent if data_dir.parent != data_dir else data_dir
+            checks.append(
+                HealthCheck(
+                    "WARN" if parent.exists() and os.access(parent, os.W_OK) else "FAIL",
+                    "Data directory",
+                    f"{data_dir} does not exist yet; parent is writable"
+                    if parent.exists() and os.access(parent, os.W_OK)
+                    else f"{data_dir} does not exist and parent is not writable",
+                )
+            )
+
+        snapshot_path = data_dir / LATEST_SNAPSHOT_FILENAME
+        try:
+            snapshot = self.artifact_store.read_latest_snapshot()
+        except Exception as exc:
+            checks.append(HealthCheck("FAIL", "Latest snapshot", f"{snapshot_path} is unreadable: {exc}"))
+        else:
+            checks.append(
+                HealthCheck(
+                    "OK" if snapshot is not None else "WARN",
+                    "Latest snapshot",
+                    f"{snapshot_path} generated {_format_artifact_age(snapshot.generated_at)}"
+                    if snapshot is not None
+                    else f"{snapshot_path} is missing; run /digest to create a baseline",
+                )
+            )
+
+        digest_path = data_dir / LATEST_DIGEST_FILENAME
+        try:
+            digest = self.artifact_store.read_latest_digest()
+        except Exception as exc:
+            checks.append(HealthCheck("FAIL", "Latest digest", f"{digest_path} is unreadable: {exc}"))
+        else:
+            checks.append(
+                HealthCheck(
+                    "OK" if digest is not None else "WARN",
+                    "Latest digest",
+                    f"{digest_path} generated {_format_artifact_age(digest.generated_at)}"
+                    if digest is not None
+                    else f"{digest_path} is missing; scheduled digest has not produced an artifact yet",
+                )
+            )
+
+        fetch_trending = getattr(self.collector, "fetch_trending_tickers", None)
+        if fetch_trending is None:
+            checks.append(HealthCheck("WARN", "ApeWisdom", "Trending check skipped for injected collector"))
+        else:
+            try:
+                trending = await fetch_trending()
+            except Exception as exc:
+                checks.append(HealthCheck("FAIL", "ApeWisdom", f"Trending request failed: {exc}"))
+            else:
+                checks.append(
+                    HealthCheck(
+                        "OK" if trending else "WARN",
+                        "ApeWisdom",
+                        f"Fetched {len(trending)} trending tickers"
+                        if trending
+                        else "Request succeeded but returned no tickers",
+                    )
+                )
+
+        logger.info("Health check complete with statuses=%s", dict(Counter(check.status for check in checks)))
+        return format_health_report(checks)

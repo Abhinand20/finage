@@ -117,6 +117,7 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("ticker", self.ticker))
         application.add_handler(CommandHandler("why", self.why))
         application.add_handler(CommandHandler("movers", self.movers))
+        application.add_handler(CommandHandler("health", self.health))
         application.run_polling()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,7 +126,7 @@ class TelegramDigestBot:
         await update.effective_message.reply_text(
             "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
             "/ticker TSLA for focused ticker evidence, /why TSLA for an explanation, "
-            "or /movers for changes versus the latest digest."
+            "/movers for changes versus the latest digest, or /health for bot status."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,7 +138,8 @@ class TelegramDigestBot:
             "/live - run a fresh social momentum scan and return a compact market brief.\n"
             "/ticker <stock> - run a fresh scan and return focused evidence for one ticker.\n"
             "/why <stock> - explain the strongest narratives behind one ticker using Gemini.\n"
-            "/movers - compare a fresh scan against the latest saved digest snapshot."
+            "/movers - compare a fresh scan against the latest saved digest snapshot.\n"
+            "/health - check config, artifacts, data directory, and ApeWisdom reachability."
         )
 
     async def digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,6 +241,22 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate movers brief")
             await update.effective_message.reply_text("Movers scan failed. Check the Pi logs.")
+
+    async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /health request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Checking Finage health...")
+        try:
+            report = await MomentumAnalysisService(self.settings).health()
+            await send_markdown_text(context.bot, update.effective_chat.id, report)
+            logger.info("Completed /health request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate health report")
+            await update.effective_message.reply_text("Health check failed. Check the Pi logs.")
 
     async def _guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         if is_authorized(update, self.allowed_ids):
