@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from finage.digest import DigestService, build_digest_payload, build_digest_prompt
 from finage.models import DigestResult, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
-from finage.prompting import render_digest_prompt
+from finage.prompting import build_ticker_why_payload, render_digest_prompt, render_ticker_why_prompt
 from finage.settings import Settings
 from finage.web_search import WebSearchResponse, WebSearchResult
 
@@ -101,6 +101,29 @@ def test_build_digest_payload_keeps_ticker_evidence() -> None:
     assert payload["ticker_evidence"][0]["posts"][0]["title"] == "TSLA catalyst thread"
 
 
+def test_build_ticker_why_payload_keeps_only_one_ticker() -> None:
+    snapshot = make_snapshot()
+    evidence = snapshot.ticker_evidence[0]
+
+    payload = build_ticker_why_payload(snapshot, "TSLA", evidence, evidence.trending)
+
+    assert payload["ticker"] == "TSLA"
+    assert payload["apewisdom"]["rank"] == 1
+    assert payload["posts"][0]["title"] == "TSLA catalyst thread"
+    assert payload["source_scope"]["subreddits"] == ["wallstreetbets", "stocks"]
+
+
+def test_render_ticker_why_prompt_requests_decision_useful_analysis() -> None:
+    snapshot = make_snapshot()
+    evidence = snapshot.ticker_evidence[0]
+
+    prompt = render_ticker_why_prompt(snapshot, "TSLA", evidence, evidence.trending)
+
+    assert "Explain why TSLA" in prompt
+    assert "Narrative" in prompt
+    assert "Sentiment" in prompt
+    assert "Counterpoints / uncertainty" in prompt
+    assert "TSLA catalyst thread" in prompt
 def test_build_digest_payload_includes_web_search_by_ticker() -> None:
     search_response = WebSearchResponse(
         query="TSLA stock latest news earnings analyst catalyst",

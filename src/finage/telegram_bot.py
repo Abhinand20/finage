@@ -8,6 +8,7 @@ from telegram import Bot, Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+from finage.analysis import MomentumAnalysisService, normalize_ticker_symbol
 from finage.digest import DigestService
 from finage.models import DigestResult
 from finage.settings import Settings
@@ -112,20 +113,33 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help))
         application.add_handler(CommandHandler("digest", self.digest))
+        application.add_handler(CommandHandler("live", self.live))
+        application.add_handler(CommandHandler("ticker", self.ticker))
+        application.add_handler(CommandHandler("why", self.why))
+        application.add_handler(CommandHandler("movers", self.movers))
+        application.add_handler(CommandHandler("health", self.health))
         application.run_polling()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):
             return
         await update.effective_message.reply_text(
-            "Finage is running. Use /digest to generate the latest WSB momentum digest."
+            "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
+            "/ticker TSLA for focused ticker evidence, /why TSLA for an explanation, "
+            "/movers for changes versus the latest digest, or /health for bot status."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):
             return
         await update.effective_message.reply_text(
-            "Commands:\n/digest - scrape WSB, generate a Gemini digest, and return it here."
+            "Commands:\n"
+            "/digest - scrape stock subreddits, generate a Gemini digest, and return it here.\n"
+            "/live - run a fresh social momentum scan and return a compact market brief.\n"
+            "/ticker <stock> - run a fresh scan and return focused evidence for one ticker.\n"
+            "/why <stock> - explain the strongest narratives behind one ticker using Gemini.\n"
+            "/movers - compare a fresh scan against the latest saved digest snapshot.\n"
+            "/health - check config, artifacts, data directory, and ApeWisdom reachability."
         )
 
     async def digest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,6 +157,106 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate digest")
             await update.effective_message.reply_text("Digest generation failed. Check the Pi logs.")
+
+    async def live(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /live request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Scanning live social momentum...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).live()
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /live request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate live momentum brief")
+            await update.effective_message.reply_text("Live scan failed. Check the Pi logs.")
+
+    async def ticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /ticker TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /ticker request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Scanning social momentum for {symbol}...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).ticker(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /ticker request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate ticker momentum brief")
+            await update.effective_message.reply_text("Ticker scan failed. Check the Pi logs.")
+
+    async def why(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /why TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc).replace("/ticker", "/why"))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /why request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Analyzing why {symbol} is moving socially...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).why(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /why request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate why brief")
+            await update.effective_message.reply_text("Why analysis failed. Check the Pi logs.")
+
+    async def movers(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /movers request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Scanning social momentum movers...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).movers()
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /movers request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate movers brief")
+            await update.effective_message.reply_text("Movers scan failed. Check the Pi logs.")
+
+    async def health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /health request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Checking Finage health...")
+        try:
+            report = await MomentumAnalysisService(self.settings).health()
+            await send_markdown_text(context.bot, update.effective_chat.id, report)
+            logger.info("Completed /health request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate health report")
+            await update.effective_message.reply_text("Health check failed. Check the Pi logs.")
 
     async def _guard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         if is_authorized(update, self.allowed_ids):
