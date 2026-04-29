@@ -96,7 +96,7 @@ def test_format_live_brief_handles_empty_trending_list() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_service_collects_writes_snapshot_and_returns_brief(tmp_path: Path) -> None:
+async def test_live_service_collects_without_writing_snapshot_and_returns_brief(tmp_path: Path) -> None:
     snapshot = make_snapshot()
     collector = FakeCollector(snapshot)
     service = MomentumAnalysisService(make_settings(tmp_path), collector=collector)
@@ -105,4 +105,4 @@ async def test_live_service_collects_writes_snapshot_and_returns_brief(tmp_path:
 
     assert collector.collected
     assert "**TSLA** #1" in brief
-    assert (tmp_path / "latest_wsb_snapshot.json").exists()
+    assert not (tmp_path / "latest_wsb_snapshot.json").exists()

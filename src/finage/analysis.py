@@ -4,7 +4,6 @@ import logging
 from collections import Counter
 from typing import Protocol
 
-from finage.artifacts import ArtifactStore
 from finage.collector import WsbCollector
 from finage.models import TickerEvidence, WsbSnapshot
 from finage.settings import Settings
@@ -110,19 +109,15 @@ class MomentumAnalysisService:
         settings: Settings,
         *,
         collector: Collector | None = None,
-        artifact_store: ArtifactStore | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
-        self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
 
     async def live(self) -> str:
         logger.info("Starting live momentum scan")
         snapshot = await self.collector.collect()
-        snapshot_path = self.artifact_store.write_snapshot(snapshot)
         logger.info(
-            "Live momentum scan complete: snapshot=%s trending=%s evidence_tickers=%s",
-            snapshot_path,
+            "Live momentum scan complete: trending=%s evidence_tickers=%s",
             len(snapshot.trending_tickers),
             len(snapshot.ticker_evidence),
         )
