@@ -20,6 +20,12 @@ class ArtifactStore:
     def write_digest(self, digest: DigestResult) -> Path:
         return self._write_model(LATEST_DIGEST_FILENAME, digest)
 
+    def read_latest_snapshot(self) -> WsbSnapshot | None:
+        path = self.data_dir / LATEST_SNAPSHOT_FILENAME
+        if not path.exists():
+            return None
+        return WsbSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
+
     def read_latest_digest(self) -> DigestResult | None:
         path = self.data_dir / LATEST_DIGEST_FILENAME
         if not path.exists():

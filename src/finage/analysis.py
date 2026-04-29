@@ -5,6 +5,7 @@ import re
 from collections import Counter
 from typing import Protocol
 
+from finage.artifacts import ArtifactStore
 from finage.collector import WsbCollector
 from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.settings import Settings
@@ -47,6 +48,12 @@ def _subreddit_summary(evidence: TickerEvidence) -> str:
 
     top_sources = [f"r/{name} x{count}" for name, count in counts.most_common(3)]
     return ", ".join(top_sources)
+
+
+def _subreddit_count(evidence: TickerEvidence | None) -> int:
+    if evidence is None:
+        return 0
+    return len({post.subreddit for post in evidence.posts if post.subreddit})
 
 
 def _top_post_summary(evidence: TickerEvidence) -> str:
@@ -148,6 +155,184 @@ def format_ticker_brief(snapshot: WsbSnapshot, symbol: str) -> str:
     return "\n".join(lines)
 
 
+def _evidence_by_ticker(snapshot: WsbSnapshot) -> dict[str, TickerEvidence]:
+    return {item.ticker: item for item in snapshot.ticker_evidence}
+
+
+def _trending_by_ticker(snapshot: WsbSnapshot) -> dict[str, TrendingTicker]:
+    return {item.ticker: item for item in snapshot.trending_tickers}
+
+
+def _format_delta(value: int) -> str:
+    if value > 0:
+        return f"+{_format_int(value)}"
+    return _format_int(value)
+
+
+def _format_rank_delta(current_rank: int, previous_rank: int) -> str:
+    delta = previous_rank - current_rank
+    if delta > 0:
+        return f"up {delta} spots"
+    if delta < 0:
+        return f"down {abs(delta)} spots"
+    return "unchanged"
+
+
+def format_movers_brief(current: WsbSnapshot, previous: WsbSnapshot | None, *, limit: int = 5) -> str:
+    """Build a read-only movement brief comparing a fresh scan to the latest saved baseline."""
+
+    source_scope = ", ".join(f"r/{name}" for name in (current.subreddits or [current.subreddit]))
+    lines = [
+        "**Social Momentum Movers**",
+        f"Current: {current.generated_at:%Y-%m-%d %H:%M UTC}",
+        f"Sources: ApeWisdom `{current.subreddit}` trend list + {source_scope}",
+        "",
+    ]
+
+    if previous is None:
+        lines.extend(
+            [
+                "No saved baseline snapshot found. Run `/digest` or `finage digest send` first so `/movers` can compare a fresh scan against the latest persisted snapshot.",
+                _top_trending_context(current),
+                "",
+                "Not financial advice; this is social-media evidence, not live price action.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.append(f"Baseline: {previous.generated_at:%Y-%m-%d %H:%M UTC}")
+    current_trending = _trending_by_ticker(current)
+    previous_trending = _trending_by_ticker(previous)
+    current_evidence = _evidence_by_ticker(current)
+    previous_evidence = _evidence_by_ticker(previous)
+
+    new_entrants = [
+        item
+        for item in current.trending_tickers
+        if item.ticker not in previous_trending
+    ][:limit]
+
+    rank_changes = [
+        (item, previous_trending[item.ticker])
+        for item in current.trending_tickers
+        if item.ticker in previous_trending and item.rank != previous_trending[item.ticker].rank
+    ]
+    rank_risers = sorted(
+        [pair for pair in rank_changes if pair[0].rank < pair[1].rank],
+        key=lambda pair: pair[1].rank - pair[0].rank,
+        reverse=True,
+    )[:limit]
+    rank_fallers = sorted(
+        [pair for pair in rank_changes if pair[0].rank > pair[1].rank],
+        key=lambda pair: pair[0].rank - pair[1].rank,
+        reverse=True,
+    )[:limit]
+
+    mention_spikes = sorted(
+        [
+            (item, item.mentions - previous_trending[item.ticker].mentions)
+            for item in current.trending_tickers
+            if item.ticker in previous_trending and item.mentions > previous_trending[item.ticker].mentions
+        ],
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:limit]
+
+    upvote_spikes = sorted(
+        [
+            (item, item.upvotes - previous_trending[item.ticker].upvotes)
+            for item in current.trending_tickers
+            if item.ticker in previous_trending and item.upvotes > previous_trending[item.ticker].upvotes
+        ],
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:limit]
+
+    evidence_leaders = sorted(current.ticker_evidence, key=lambda item: item.evidence_score, reverse=True)[:limit]
+    breadth_gainers = sorted(
+        [
+            (
+                evidence,
+                _subreddit_count(evidence) - _subreddit_count(previous_evidence.get(evidence.ticker)),
+            )
+            for evidence in current.ticker_evidence
+            if _subreddit_count(evidence) > _subreddit_count(previous_evidence.get(evidence.ticker))
+        ],
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:limit]
+
+    lines.append("")
+    lines.append("**New Entrants**")
+    if new_entrants:
+        for item in new_entrants:
+            lines.append(
+                f"- **{item.ticker}** entered at #{item.rank}: {_format_int(item.mentions)} mentions, {_format_int(item.upvotes)} upvotes."
+            )
+    else:
+        lines.append("- None in the current top trend list.")
+
+    lines.append("")
+    lines.append("**Rank Risers**")
+    if rank_risers:
+        for current_item, previous_item in rank_risers:
+            lines.append(
+                f"- **{current_item.ticker}** #{previous_item.rank} -> #{current_item.rank} ({_format_rank_delta(current_item.rank, previous_item.rank)})."
+            )
+    else:
+        lines.append("- No rank risers versus baseline.")
+
+    lines.append("")
+    lines.append("**Rank Fallers**")
+    if rank_fallers:
+        for current_item, previous_item in rank_fallers:
+            lines.append(
+                f"- **{current_item.ticker}** #{previous_item.rank} -> #{current_item.rank} ({_format_rank_delta(current_item.rank, previous_item.rank)})."
+            )
+    else:
+        lines.append("- No rank fallers versus baseline.")
+
+    lines.append("")
+    lines.append("**Mention Spikes**")
+    if mention_spikes:
+        for item, delta in mention_spikes:
+            lines.append(f"- **{item.ticker}** {_format_delta(delta)} mentions to {_format_int(item.mentions)} total.")
+    else:
+        lines.append("- No positive mention deltas versus baseline.")
+
+    lines.append("")
+    lines.append("**Upvote Spikes**")
+    if upvote_spikes:
+        for item, delta in upvote_spikes:
+            lines.append(f"- **{item.ticker}** {_format_delta(delta)} upvotes to {_format_int(item.upvotes)} total.")
+    else:
+        lines.append("- No positive upvote deltas versus baseline.")
+
+    lines.append("")
+    lines.append("**Evidence Leaders**")
+    if evidence_leaders:
+        for evidence in evidence_leaders:
+            previous_score = previous_evidence.get(evidence.ticker).evidence_score if evidence.ticker in previous_evidence else 0
+            delta = evidence.evidence_score - previous_score
+            lines.append(
+                f"- **{evidence.ticker}** evidence score {_format_int(evidence.evidence_score)} ({_format_delta(delta)}), "
+                f"{_subreddit_summary(evidence)}. Top thread: {_top_post_summary(evidence)}"
+            )
+    else:
+        lines.append("- No qualifying Reddit evidence in the current scan.")
+
+    if breadth_gainers:
+        lines.append("")
+        lines.append("**Broader Subreddit Coverage**")
+        for evidence, delta in breadth_gainers:
+            lines.append(
+                f"- **{evidence.ticker}** gained {_format_delta(delta)} subreddit sources: {_subreddit_summary(evidence)}."
+            )
+
+    lines.extend(["", "Not financial advice; this is social-media evidence, not live price action."])
+    return "\n".join(lines)
+
+
 def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
     """Build a deterministic Telegram-ready brief for the latest social momentum scan."""
 
@@ -219,9 +404,11 @@ class MomentumAnalysisService:
         settings: Settings,
         *,
         collector: Collector | None = None,
+        artifact_store: ArtifactStore | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
+        self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
 
     async def live(self) -> str:
         logger.info("Starting live momentum scan")
@@ -244,3 +431,15 @@ class MomentumAnalysisService:
             len(snapshot.ticker_evidence),
         )
         return format_ticker_brief(snapshot, ticker)
+
+    async def movers(self) -> str:
+        logger.info("Starting movers scan")
+        previous = self.artifact_store.read_latest_snapshot()
+        snapshot = await self.collector.collect()
+        logger.info(
+            "Movers scan complete: baseline_found=%s trending=%s evidence_tickers=%s",
+            previous is not None,
+            len(snapshot.trending_tickers),
+            len(snapshot.ticker_evidence),
+        )
+        return format_movers_brief(snapshot, previous)

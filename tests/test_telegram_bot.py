@@ -99,6 +99,7 @@ async def test_help_lists_live_command() -> None:
 
     assert "/live" in message.replies[0]
     assert "/ticker <stock>" in message.replies[0]
+    assert "/movers" in message.replies[0]
 
 
 @pytest.mark.asyncio
@@ -156,3 +157,29 @@ async def test_ticker_sends_focused_markdown_brief(monkeypatch: pytest.MonkeyPat
     assert message.replies == ["Scanning social momentum for TSLA..."]
     assert bot.messages[0]["chat_id"] == 999
     assert "<b>TSLA Social Momentum</b>" in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_movers_sends_markdown_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def movers(self) -> str:
+            return "**Social Momentum Movers**\n- focused movers"
+
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=[])
+
+    await TelegramDigestBot(make_settings()).movers(update, context)
+
+    assert message.replies == ["Scanning social momentum movers..."]
+    assert bot.messages[0]["chat_id"] == 999
+    assert "<b>Social Momentum Movers</b>" in bot.messages[0]["text"]

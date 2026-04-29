@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from finage.analysis import MomentumAnalysisService, format_live_brief, format_ticker_brief, normalize_ticker_symbol
+from finage.artifacts import ArtifactStore
+from finage.analysis import (
+    MomentumAnalysisService,
+    format_live_brief,
+    format_movers_brief,
+    format_ticker_brief,
+    normalize_ticker_symbol,
+)
 from finage.models import CommentEvidence, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
 from finage.settings import Settings
 
@@ -76,6 +83,72 @@ def make_snapshot() -> WsbSnapshot:
     )
 
 
+def make_previous_movers_snapshot() -> WsbSnapshot:
+    return WsbSnapshot(
+        subreddit="wallstreetbets",
+        subreddits=["stocks", "wallstreetbets"],
+        trending_tickers=[
+            TrendingTicker(ticker="AMD", rank=1, mentions=900, upvotes=3000),
+            TrendingTicker(ticker="TSLA", rank=2, mentions=1000, upvotes=4000),
+        ],
+        ticker_evidence=[
+            TickerEvidence(
+                ticker="TSLA",
+                trending=TrendingTicker(ticker="TSLA", rank=2, mentions=1000, upvotes=4000),
+                posts=[
+                    PostEvidence(
+                        id="old-tsla",
+                        subreddit="stocks",
+                        url="https://www.reddit.com/r/stocks/comments/old-tsla",
+                        title="Old TSLA thread",
+                        score=400,
+                        num_comments=100,
+                        mentioned_tickers=["TSLA"],
+                    )
+                ],
+            ),
+            TickerEvidence(
+                ticker="AMD",
+                trending=TrendingTicker(ticker="AMD", rank=1, mentions=900, upvotes=3000),
+                posts=[
+                    PostEvidence(
+                        id="old-amd",
+                        subreddit="stocks",
+                        url="https://www.reddit.com/r/stocks/comments/old-amd",
+                        title="Old AMD thread",
+                        score=300,
+                        num_comments=100,
+                        mentioned_tickers=["AMD"],
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def make_current_movers_snapshot() -> WsbSnapshot:
+    snapshot = make_snapshot()
+    snapshot.trending_tickers.append(TrendingTicker(ticker="AMD", rank=3, mentions=850, upvotes=2500))
+    snapshot.ticker_evidence.append(
+        TickerEvidence(
+            ticker="AMD",
+            trending=TrendingTicker(ticker="AMD", rank=3, mentions=850, upvotes=2500),
+            posts=[
+                PostEvidence(
+                    id="new-amd",
+                    subreddit="stocks",
+                    url="https://www.reddit.com/r/stocks/comments/new-amd",
+                    title="AMD fading thread",
+                    score=250,
+                    num_comments=50,
+                    mentioned_tickers=["AMD"],
+                )
+            ],
+        )
+    )
+    return snapshot
+
+
 def test_format_live_brief_includes_ranked_evidence_and_subreddit_breadth() -> None:
     brief = format_live_brief(make_snapshot())
 
@@ -137,6 +210,27 @@ def test_format_ticker_brief_explains_non_trending_ticker() -> None:
     assert "Finage did not collect targeted Reddit evidence" in brief
 
 
+def test_format_movers_brief_compares_current_scan_to_baseline() -> None:
+    brief = format_movers_brief(make_current_movers_snapshot(), make_previous_movers_snapshot())
+
+    assert "**Social Momentum Movers**" in brief
+    assert "**NVDA** entered at #2" in brief
+    assert "**TSLA** #2 -> #1 (up 1 spots)" in brief
+    assert "**AMD** #1 -> #3 (down 2 spots)" in brief
+    assert "**TSLA** +200 mentions to 1,200 total." in brief
+    assert "**TSLA** +1,000 upvotes to 5,000 total." in brief
+    assert "**TSLA** evidence score 1,700 (+1,200)" in brief
+    assert "**TSLA** gained +1 subreddit sources" in brief
+
+
+def test_format_movers_brief_explains_missing_baseline() -> None:
+    brief = format_movers_brief(make_snapshot(), None)
+
+    assert "No saved baseline snapshot found" in brief
+    assert "Run `/digest` or `finage digest send` first" in brief
+    assert "Current top tickers: TSLA #1, NVDA #2" in brief
+
+
 @pytest.mark.asyncio
 async def test_live_service_collects_without_writing_snapshot_and_returns_brief(tmp_path: Path) -> None:
     snapshot = make_snapshot()
@@ -161,3 +255,20 @@ async def test_ticker_service_collects_without_writing_snapshot_and_returns_brie
     assert collector.collected
     assert "**TSLA Social Momentum**" in brief
     assert not (tmp_path / "latest_wsb_snapshot.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_movers_service_compares_without_overwriting_latest_snapshot(tmp_path: Path) -> None:
+    previous = make_previous_movers_snapshot()
+    ArtifactStore(tmp_path).write_snapshot(previous)
+    snapshot_path = tmp_path / "latest_wsb_snapshot.json"
+    original_snapshot_json = snapshot_path.read_text(encoding="utf-8")
+    collector = FakeCollector(make_current_movers_snapshot())
+    service = MomentumAnalysisService(make_settings(tmp_path), collector=collector)
+
+    brief = await service.movers()
+
+    assert collector.collected
+    assert "**Social Momentum Movers**" in brief
+    assert "**NVDA** entered at #2" in brief
+    assert snapshot_path.read_text(encoding="utf-8") == original_snapshot_json
