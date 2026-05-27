@@ -8,11 +8,12 @@
 
 ## 1. Goals
 
-1. Ingest Senate and House financial disclosures daily via FMP's bulk latest endpoints.
+1. Ingest Senate and House financial disclosures daily via FMP's latest endpoints.
 2. Persist a growing historical ledger locally so the bot has context beyond the current fetch window.
-3. Surface high-conviction trades in the daily Gemini digest as an appended section.
-4. Flag "convergence" when a congressional ticker also appears in the Reddit social momentum top-10.
-5. Expose an on-demand `/senate <TICKER>` command that returns a Gemini analysis of all known trades for that ticker.
+3. Track "new findings" separately from full history so the daily digest can emphasize what changed since the previous successful run.
+4. Surface high-conviction trades in the daily Gemini digest as an appended, deterministic section.
+5. Score convergence when a congressional ticker also appears in the Reddit social momentum top-10.
+6. Expose an on-demand `/senate <TICKER>` command that returns a Gemini analysis of all known trades for that ticker.
 
 ---
 
@@ -23,9 +24,10 @@
 | `https://financialmodelingprep.com/stable/senate-latest` | `page=0&limit=250&apikey=KEY` |
 | `https://financialmodelingprep.com/stable/house-latest` | `page=0&limit=250&apikey=KEY` |
 
-- **2 API calls per daily refresh** — safe for FMP free tier (250 calls/day quota).
-- Max 250 records per request; page 0 covers ~2–4 weeks of recent disclosures per chamber.
-- **Bootstrap run** (first execution): paginate through pages 0–N until `transactionDate` falls outside `congress_lookback_days`. Subsequent daily runs fetch page 0 only.
+- Usually **2 API calls per daily refresh** — one Senate page and one House page — safe for FMP free tier (250 calls/day quota).
+- Max 250 records per request; page 0 often covers ~2–4 weeks of recent disclosures per chamber, but the collector must not assume this.
+- **Bootstrap run** (first execution): paginate through pages 0–N until the oldest `disclosureDate` on the page is older than `today - congress_bootstrap_days`.
+- **Daily refresh:** paginate until the oldest `disclosureDate` on the page is older than `last_successful_fetch_at - 1 day`, or until `congress_max_pages_per_refresh` is reached. This prevents missed records if FMP returns more than 250 disclosures between runs.
 - Required env var: `FMP_API_KEY` (already in `.env.example` for the Stocknear reference; added to finage's settings).
 
 **Raw fields returned:**
@@ -64,15 +66,24 @@ Unmapped strings are stored as-is.
 
 ```python
 class CongressTrade(BaseModel):
-    trade_id: str               # sha256[:12] of ticker|representative|transaction_date|transaction_type|amount
+    trade_id: str               # stable identity key; see §5.1
+    source_hash: str            # hash of normalized source payload for correction detection
     ticker: str
     asset_description: str
     representative: str
     chamber: Literal["Senate", "House"]
     transaction_type: Literal["Bought", "Sold", "Exchange"]
+    raw_type: str
     amount: str                 # bucketed label
+    amount_min: int | None      # parsed lower bound when available
+    amount_max: int | None      # parsed upper bound when available
+    amount_midpoint: int | None # ranking estimate when range is available
+    raw_amount: str
     transaction_date: date
     disclosure_date: date
+    disclosure_lag_days: int
+    first_seen_at: datetime
+    last_seen_at: datetime
 ```
 
 ### 3.3 `CongressSnapshot`
@@ -82,6 +93,8 @@ class CongressSnapshot(BaseModel):
     fetched_at: datetime
     total_trades: int
     new_trades: int             # count of trades added in this refresh cycle
+    corrected_trades: int       # count of existing IDs whose source_hash changed
+    last_successful_fetch_at: datetime | None
     trades: list[CongressTrade] # full history, sorted by disclosure_date desc
 ```
 
@@ -94,17 +107,25 @@ class CongressSignal(BaseModel):
     ticker: str
     asset_description: str
     total_score: float
+    net_buy_score: float        # buy score minus sell score after weighting
     buy_count: int
     sell_count: int
     trade_count: int
+    new_trade_count: int        # first seen in the most recent successful refresh
+    unique_politicians: int
+    total_bought_value_midpoint: int
+    total_sold_value_midpoint: int
     largest_amount: str         # highest-value bucket seen
     politicians: list[str]      # deduplicated representative names
     latest_disclosure: date
+    days_since_disclosure: int
+    avg_disclosure_lag_days: float
     is_cluster: bool            # 2+ buys on this ticker within the lookback window
     is_bicameral: bool          # trades from both Senate AND House members on same ticker
+    convergence_score: float | None = None
 ```
 
-Note: Party affiliation is not available from FMP's latest endpoints and is out of scope (see §12). `is_bicameral` is used instead as a signal that interest spans both chambers.
+Note: Party affiliation is not available from FMP's latest endpoints and is out of scope (see §15). `is_bicameral` is used instead as a signal that interest spans both chambers.
 
 ---
 
@@ -113,6 +134,8 @@ Note: Party affiliation is not available from FMP's latest endpoints and is out 
 ```python
 fmp_api_key: str | None = None
 congress_lookback_days: int = 30          # window for digest + signal scoring
+congress_bootstrap_days: int = 180        # initial backfill window
+congress_max_pages_per_refresh: int = 4   # safety cap per chamber for daily fetches
 congress_cache_ttl_hours: int = 12        # TTL for the pull-with-cache strategy
 congress_min_signal_score: float = 2.0    # minimum score to appear in digest
 congress_enabled: bool = True             # toggle entire feature off if no FMP key
@@ -127,7 +150,9 @@ congress_enabled: bool = True             # toggle entire feature off if no FMP 
 ```
 data/congress/
   history.json        ← CongressSnapshot (full ledger, append-only)
-  latest.json         ← CongressSnapshot (last fetch metadata + full trades list — same shape)
+  latest_fetch.json   ← fetch metadata, page counts, and freshness state
+  new_trades.json     ← list[CongressTrade] first seen in the most recent successful refresh
+  latest.json         ← compatibility alias for the current CongressSnapshot
   by_ticker/
     NVDA.json         ← list[CongressTrade] filtered to this ticker, sorted by disclosure_date desc
     TSLA.json
@@ -137,19 +162,25 @@ data/congress/
 ### 5.1 Deduplication & Append Logic
 
 ```
-trade_id = sha256(f"{ticker}|{representative}|{transaction_date}|{transaction_type}|{amount}".encode()).hexdigest()[:12]
+trade_id = sha256(
+    f"{chamber}|{ticker}|{representative}|{asset_description}|"
+    f"{transaction_date}|{disclosure_date}|{raw_type}|{raw_amount}"
+).hexdigest()[:16]
+
+source_hash = sha256(normalized_source_payload).hexdigest()[:16]
 ```
 
 On each refresh:
-1. Fetch both FMP endpoints (Senate + House).
+1. Fetch both FMP endpoints (Senate + House), paginating according to the bootstrap or daily rules in §2.
 2. Normalize all fields; compute `trade_id` for each record.
 3. Load `history.json`; build `existing_ids = {t.trade_id for t in history.trades}`.
 4. Filter to `new_trades = [t for t in fetched if t.trade_id not in existing_ids]`.
-5. Append `new_trades` to `history.trades`; sort by `disclosure_date` descending.
-6. Write updated `history.json` and `latest.json` (with `new_trades` count).
-7. For each ticker that had new trades, rewrite `by_ticker/{TICKER}.json`.
+5. For existing IDs, compare `source_hash`; if changed, update the stored record and increment `corrected_trades`.
+6. Append `new_trades` to `history.trades`; sort by `disclosure_date` descending.
+7. Write updated `history.json`, `latest_fetch.json`, `new_trades.json`, and `latest.json`.
+8. For each ticker that had new or corrected trades, rewrite `by_ticker/{TICKER}.json`.
 
-`latest.json` and `history.json` share the same `CongressSnapshot` schema. `latest.json` has `new_trades > 0` only immediately after a refresh that found new data.
+`new_trades.json` is the primary input for "what changed today" analysis. `history.json` remains the source for ticker history, scoring, and `/senate <TICKER>`.
 
 ---
 
@@ -168,7 +199,7 @@ class CongressCollector:
     async def get_or_fetch(self) -> CongressSnapshot:
         """Return cached snapshot if age < congress_cache_ttl_hours, else re-fetch."""
 
-    async def fetch(self) -> CongressSnapshot:
+    async def fetch(self, *, bootstrap: bool = False) -> CongressSnapshot:
         """Unconditional fetch from FMP, deduplicate, persist, return updated snapshot."""
 
     def get_cached(self) -> CongressSnapshot | None:
@@ -182,7 +213,8 @@ class CongressCollector:
 - `httpx.AsyncClient` with 20s timeout (matches existing `web_search.py` pattern).
 - Fetch Senate and House concurrently via `asyncio.gather`.
 - On HTTP error: log warning, return stale cache if available; raise only if cache is also absent.
-- Bootstrap mode: if `history.json` is absent or empty, paginate pages 0, 1, 2, … until fetched records have `transaction_date < today - congress_lookback_days * 3`. This ensures a rich initial history without hammering the API.
+- Bootstrap mode: if `history.json` is absent or empty, paginate pages 0, 1, 2, … until fetched records have `disclosure_date < today - congress_bootstrap_days`, or until the daily page cap is reached.
+- Daily mode: paginate until the oldest page `disclosureDate` is older than `last_successful_fetch_at - 1 day`, or until `congress_max_pages_per_refresh` is reached.
 
 ### 6.2 `CongressAnalyzer`
 
@@ -193,6 +225,7 @@ class CongressAnalyzer:
     def top_signals(
         self,
         trades: list[CongressTrade],
+        new_trades: list[CongressTrade],
         lookback_days: int,
         min_score: float,
     ) -> list[CongressSignal]:
@@ -208,6 +241,14 @@ class CongressAnalyzer:
     ) -> set[str]:
         """Return tickers that appear in both signals and reddit_tickers."""
 
+    def apply_convergence_scores(
+        self,
+        signals: list[CongressSignal],
+        reddit_tickers: list[TrendingTicker],
+        evidence_by_ticker: dict[str, TickerEvidence],
+    ) -> list[CongressSignal]:
+        """Add convergence_score for tickers that also have social momentum evidence."""
+
     def format_signal_line(self, signal: CongressSignal, overlap: bool) -> str:
         """
         Return a single Markdown bullet for one ticker signal.
@@ -219,26 +260,32 @@ class CongressAnalyzer:
 ### 6.3 Signal Scoring
 
 ```
-score(trade) = amount_weight(trade.amount)
+score(trade) = amount_weight(trade.amount_midpoint)
              × type_weight(trade.transaction_type)
              × recency_weight(trade.disclosure_date)
 
 ticker_score = sum(score(t) for t in ticker_trades)
              × cluster_bonus(buy_count)
+
+convergence_score = total_score
+                  + social_rank_score(reddit_rank)
+                  + evidence_score_normalized(ticker_evidence.evidence_score)
 ```
+
+Scoring is deterministic and happens in code. Gemini receives the ranked output and writes commentary only; it does not decide which trades are important.
 
 **Weights:**
 
-| Amount | Weight |
+| Estimated amount midpoint | Weight |
 |--------|--------|
-| Over $5M | 6.0 |
-| $1M-$5M | 5.0 |
-| $500K-$1M | 3.5 |
-| $250K-$500K | 2.5 |
-| $100K-$250K | 2.0 |
-| $50K-$100K | 1.5 |
-| $15K-$50K | 1.0 |
-| $1K-$15K | 0.5 |
+| ≥ $5M | 6.0 |
+| ≥ $1M | 5.0 |
+| ≥ $500K | 3.5 |
+| ≥ $250K | 2.5 |
+| ≥ $100K | 2.0 |
+| ≥ $50K | 1.5 |
+| ≥ $15K | 1.0 |
+| < $15K | 0.5 |
 
 | Type | Weight |
 |------|--------|
@@ -259,6 +306,15 @@ ticker_score = sum(score(t) for t in ticker_trades)
 | 2 buyers | ×1.5 |
 | 3+ buyers | ×2.0 |
 
+| Social rank | Score |
+|-------------|-------|
+| Reddit rank 1–3 | +3.0 |
+| Reddit rank 4–10 | +2.0 |
+| Reddit rank 11–25 | +1.0 |
+| Not ranked | +0.0 |
+
+`evidence_score_normalized` is capped at `+3.0` using the existing `TickerEvidence.evidence_score` so one viral post cannot dominate the combined signal.
+
 ---
 
 ## 7. Digest Integration (`src/finage/digest.py`)
@@ -266,18 +322,21 @@ ticker_score = sum(score(t) for t in ticker_trades)
 The `DigestService.generate()` method is extended as follows:
 
 1. Call `CongressCollector(settings).get_or_fetch()` concurrently with `WsbCollector.collect()` using `asyncio.gather`. If `congress_enabled` is `False`, skip.
-2. Compute `signals = CongressAnalyzer().top_signals(snapshot.trades, lookback_days, min_score)`.
-3. Compute `overlap = CongressAnalyzer().overlap_tickers(signals, wsb_tickers)` where `wsb_tickers` are the top-10 tickers from the `WsbSnapshot`.
-4. Build a `congress_section` string using `format_signal_line` for each signal, marking overlaps with `⚡ CONVERGENCE`.
-5. Inject `congress_section` into the Gemini prompt as a clearly delimited block after the WSB evidence (see §7.1).
+2. Load `new_trades.json` so the digest can distinguish "newly disclosed" from "still historically notable".
+3. Compute `signals = CongressAnalyzer().top_signals(snapshot.trades, new_trades, lookback_days, min_score)`.
+4. Compute `overlap = CongressAnalyzer().overlap_tickers(signals, wsb_tickers)` where `wsb_tickers` are the top-10 tickers from the `WsbSnapshot`.
+5. Apply `convergence_score` to overlapping signals using Reddit rank and `TickerEvidence.evidence_score`.
+6. Build a `congress_section` string using `format_signal_line` for each signal, marking overlaps with `⚡ CONVERGENCE` and sorting by `convergence_score` first, then `total_score`.
+7. Inject `congress_section` into the Gemini prompt as a clearly delimited block after the WSB evidence (see §7.1).
 
-The existing digest prompt file (`prompts/wsb_digest.md`) is **not modified**. The congress section is appended to the assembled prompt string in Python, keeping concerns separate.
+The existing digest prompt file (`prompts/wsb_digest.md`) is **not modified**. The congress prompt fragment lives in `prompts/congress_digest.md` and is appended to the assembled prompt string in Python, keeping concerns separate.
 
 ### 7.1 Prompt Injection
 
 ```
 --- CONGRESSIONAL TRADING DATA ---
 Disclosures filed in the last {lookback_days} days. Signals above score threshold only.
+Ordering and tags are precomputed by code; do not reorder tickers or invent additional trades.
 
 {congress_section_markdown}
 
@@ -285,7 +344,7 @@ Overlap with social momentum top-10: {overlap_list}
 
 Instructions: After your main momentum analysis, add a "## Congressional Activity" section.
 Format it as bullet points, one per ticker. Include politician names, amount ranges, and
-buy/sell direction. Mark any ticker in the overlap list as "⚡ CONVERGENCE".
+buy/sell direction. Preserve all "NEW", "Cluster", "Bicameral", and "⚡ CONVERGENCE" labels.
 If no signals exist above the threshold, write a single line:
 "No notable congressional activity this period."
 --- END CONGRESSIONAL TRADING DATA ---
@@ -297,7 +356,7 @@ If no signals exist above the threshold, write a single line:
 ## Congressional Activity
 *Disclosures filed in the last 30 days*
 
-- **NVDA** — 3 purchases · $50K–$500K · Sen. Tuberville, Rep. Pelosi, Rep. Crenshaw · Cluster · Bicameral ⚡ CONVERGENCE (Reddit rank #2)
+- **NVDA** — NEW · 3 purchases · est. $275K bought · largest $100K-$250K · Sen. Tuberville, Rep. Pelosi, Rep. Crenshaw · Cluster · Bicameral ⚡ CONVERGENCE (Reddit rank #2)
 - **RTX** — 1 purchase · $100K–$250K · Rep. Crenshaw (R-TX)
 - **GOOGL** — 1 purchase · $250K–$500K · Rep. Pelosi (D-CA)
 
@@ -336,9 +395,9 @@ Current social momentum context:
 - ApeWisdom Reddit rank: {reddit_rank} (or "not in top {ticker_limit}" if absent)
 
 Provide a concise analysis covering:
-1. Overall pattern — are insiders buying or selling? Any cluster activity?
+1. Overall pattern — are members of Congress buying or selling? Any cluster activity?
 2. Largest trades and who made them.
-3. Signal strength — how significant is this activity?
+3. Signal strength — how significant is this activity, based on the precomputed score and estimated dollar exposure?
 4. Whether the social momentum context strengthens or weakens the thesis.
 
 If there are no trades, note that and provide general sector/regulatory context for {ticker}.
@@ -364,7 +423,54 @@ This is a low-effort addition that makes convergence visible without changing th
 
 ---
 
-## 10. New & Modified Files
+## 10. CLI & Daily Refresh
+
+Add a CLI command so the daily refresh can run independently from Telegram and the digest:
+
+```bash
+finage congress refresh
+```
+
+Behavior:
+- Calls `CongressCollector.fetch()`.
+- Uses bootstrap mode automatically if `history.json` is missing or empty.
+- Writes `history.json`, `latest_fetch.json`, `new_trades.json`, `latest.json`, and changed `by_ticker/` files.
+- Prints a compact summary: pages fetched per chamber, total records fetched, new trades, corrected trades, cache path.
+
+This command is wired into PM2/cron on the Raspberry Pi for once-daily execution. The digest and `/senate` still use `get_or_fetch()` as a safety net, but the expected path is that daily congress data already exists before the digest runs.
+
+---
+
+## 11. Analysis Quality Rules
+
+1. **Code ranks, Gemini narrates.** The analyzer computes signal ordering, labels, and convergence. Gemini may explain but should not reorder, invent, or suppress trades.
+2. **Disclosures are not real-time trades.** All output must distinguish `transaction_date` from `disclosure_date`, and mention disclosure lag when meaningful.
+3. **Purchases carry more signal than sales.** Sales remain visible but are weighted lower because they can be tax planning or diversification.
+4. **New findings are highlighted.** Trades from `new_trades.json` get a `NEW` label in the digest even if the transaction date is older.
+5. **Convergence is stronger than either signal alone.** A ticker with both congressional activity and social momentum ranks above a ticker with only one source unless the single-source score is dramatically higher.
+6. **Explainable numbers beat vague labels.** Digest lines should include trade count, direction, estimated dollar exposure, largest amount bucket, key politicians, and reason labels.
+
+---
+
+## 12. Test Plan
+
+Add focused tests before implementation is considered complete:
+
+| Test Area | Coverage |
+|-----------|----------|
+| Normalization | Maps FMP fields, amount buckets, transaction types, date parsing, disclosure lag |
+| Deduplication | Same trade is not duplicated across daily runs; same-day multi-trade edge cases remain distinct |
+| Corrections | Same `trade_id` with changed `source_hash` updates the stored record and increments `corrected_trades` |
+| Pagination | Bootstrap stops by `congress_bootstrap_days`; daily refresh stops by `last_successful_fetch_at`; page cap prevents runaway calls |
+| Scoring | Larger buys outrank smaller buys; sales are downweighted; cluster and convergence bonuses apply correctly |
+| Storage | Writes `history.json`, `new_trades.json`, `latest_fetch.json`, `latest.json`, and changed ticker files |
+| Cache fallback | Stale cache is served when FMP fails; no-cache failure produces a user-facing error |
+| Digest injection | Congressional section is appended, deterministic labels are preserved, no section appears when disabled |
+| `/senate` command | Valid ticker, invalid ticker, no-data Gemini path, stale-cache path |
+
+---
+
+## 13. New & Modified Files
 
 ### New
 
@@ -383,22 +489,25 @@ This is a low-effort addition that makes convergence visible without changing th
 | `src/finage/digest.py` | Gather congress data concurrently; inject into Gemini prompt |
 | `src/finage/analysis.py` | Add `senate()` method; enrich `live()` with `🏛️` badges |
 | `src/finage/telegram_bot.py` | Register `/senate` `CommandHandler`; add `senate()` handler |
-| `.env.example` | Add `FMP_API_KEY`, `CONGRESS_LOOKBACK_DAYS`, `CONGRESS_CACHE_TTL_HOURS`, `CONGRESS_MIN_SIGNAL_SCORE` |
+| `src/finage/cli.py` | Add `finage congress refresh` command |
+| `.env.example` | Add `FMP_API_KEY`, `CONGRESS_LOOKBACK_DAYS`, `CONGRESS_BOOTSTRAP_DAYS`, `CONGRESS_MAX_PAGES_PER_REFRESH`, `CONGRESS_CACHE_TTL_HOURS`, `CONGRESS_MIN_SIGNAL_SCORE` |
 
 ---
 
-## 11. Settings Reference
+## 14. Settings Reference
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `FMP_API_KEY` | *(required to enable)* | FMP API key; feature auto-disables if absent |
 | `CONGRESS_LOOKBACK_DAYS` | `30` | Days of disclosures to include in digest signals |
+| `CONGRESS_BOOTSTRAP_DAYS` | `180` | Initial backfill window when no local history exists |
+| `CONGRESS_MAX_PAGES_PER_REFRESH` | `4` | Safety cap per chamber per refresh |
 | `CONGRESS_CACHE_TTL_HOURS` | `12` | Hours before cached snapshot is considered stale |
 | `CONGRESS_MIN_SIGNAL_SCORE` | `2.0` | Minimum score for a ticker to appear in digest |
 
 ---
 
-## 12. Out of Scope
+## 15. Out of Scope
 
 - Politician party data (FMP latest endpoints do not return party affiliation; `is_bicameral` is used as a weaker proxy signal instead).
 - Committee membership relevance scoring.
