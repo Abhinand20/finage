@@ -141,6 +141,12 @@ pm2 logs finage-bot
 pm2 logs finage-digest
 ```
 
+Pull the latest `main` branch and restart the bot:
+
+```bash
+scripts/deploy-latest.sh
+```
+
 Run a one-off manual digest send:
 
 ```bash
