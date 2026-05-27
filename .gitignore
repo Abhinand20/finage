@@ -3,5 +3,7 @@ wsb-analyst-mcp/
 .venv/
 data/*.json
 data/*.log
+data/
+src/finage/data/
 __pycache__/
 .pytest_cache/

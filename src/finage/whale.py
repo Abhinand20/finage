@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,7 +60,11 @@ def _clean_int(value: Any) -> int:
     if value is None or value == "":
         return 0
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return 0
         return int(value)
+    if str(value).lower() in {"nan", "none", "<na>"}:
+        return 0
     return int(str(value).replace(",", "").replace("$", "").strip() or "0")
 
 

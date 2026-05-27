@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import nan
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -161,6 +162,25 @@ def test_normalize_whale_change_maps_comparison_row() -> None:
     assert change.shares_delta == 50
     assert change.shares_delta_pct == 50.0
     assert change.value_delta_usd == 1_000_000
+
+
+def test_normalize_whale_change_treats_nan_as_zero() -> None:
+    change = normalize_whale_change(
+        {
+            "Ticker": "NVDA",
+            "Status": "NEW",
+            "Shares": nan,
+            "Previous Shares": nan,
+            "Value": 2500,
+            "Previous Value": nan,
+        }
+    )
+
+    assert change.current_shares == 0
+    assert change.prior_shares == 0
+    assert change.shares_delta == 0
+    assert change.prior_value_usd == 0
+    assert change.current_value_usd == 2_500_000
 
 
 class FakeFrame:
