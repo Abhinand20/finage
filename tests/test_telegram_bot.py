@@ -9,8 +9,10 @@ from finage.telegram_bot import (
     chunk_text,
     is_authorized,
     markdown_to_telegram_html,
+    send_digest,
     send_markdown_text,
 )
+from finage.models import DigestResult
 
 
 def make_update(user_id: int | None, chat_id: int | None):
@@ -76,6 +78,33 @@ async def test_send_markdown_text_uses_telegram_html_parse_mode() -> None:
     assert bot.messages[0]["chat_id"] == 123
     assert bot.messages[0]["parse_mode"] == ParseMode.HTML
     assert bot.messages[0]["text"] == "<b>TSLA</b> momentum"
+
+
+@pytest.mark.asyncio
+async def test_send_digest_sends_whale_followup_after_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bot = FakeBot()
+
+    class FakeBotContext:
+        def __init__(self, token: str):
+            assert token == "telegram-token"
+
+        async def __aenter__(self):
+            return fake_bot
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("finage.telegram_bot.Bot", FakeBotContext)
+
+    await send_digest(
+        make_settings(),
+        DigestResult(provider="fake", model="fake", digest="**Daily Digest**"),
+        whale_followup="**Whale Momentum**\n- NVDA",
+    )
+
+    assert len(fake_bot.messages) == 2
+    assert "<b>Daily Digest</b>" in fake_bot.messages[0]["text"]
+    assert "<b>Whale Momentum</b>" in fake_bot.messages[1]["text"]
 
 
 class FakeMessage:
@@ -158,6 +187,44 @@ async def test_whales_sends_markdown_brief(monkeypatch: pytest.MonkeyPatch) -> N
     assert message.replies == ["Analyzing top whale 13F momentum..."]
     assert bot.messages[0]["chat_id"] == 999
     assert "<b>Whale Momentum</b>" in bot.messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_digest_command_sends_whale_followup(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDigestService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def generate(self) -> DigestResult:
+            return DigestResult(provider="fake", model="fake", digest="**Daily Digest**")
+
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def whales(self) -> str:
+            return "**Whale Momentum**\n- NVDA"
+
+    monkeypatch.setattr("finage.telegram_bot.DigestService", FakeDigestService)
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    settings = make_settings()
+    settings.edgar_identity = "finage@example.com"
+    settings.whale_enabled = True
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=[])
+
+    await TelegramDigestBot(settings).digest(update, context)
+
+    assert message.replies == ["Generating WSB digest..."]
+    assert len(bot.messages) == 2
+    assert "<b>Daily Digest</b>" in bot.messages[0]["text"]
+    assert "<b>Whale Momentum</b>" in bot.messages[1]["text"]
 
 
 @pytest.mark.asyncio

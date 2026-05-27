@@ -223,9 +223,18 @@ def render_whales_digest_prompt(*, signal_lines: str, top_n: int) -> str:
     return template.format(signal_lines=signal_lines, top_n=top_n)
 
 
-def render_whale_digest_prompt(*, signal_lines: str) -> str:
+def render_whale_digest_prompt(
+    *,
+    signal_lines: str,
+    filing_updates: str = "No whale filing update summary available.",
+    refresh_changes: str = "No whale refresh comparison available.",
+) -> str:
     template = resources.files("finage.prompts").joinpath("whale_digest.md").read_text(encoding="utf-8")
-    return template.format(signal_lines=signal_lines)
+    return template.format(
+        signal_lines=signal_lines,
+        filing_updates=filing_updates,
+        refresh_changes=refresh_changes,
+    )
 
 
 def load_digest_prompt_template(

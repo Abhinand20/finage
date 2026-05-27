@@ -12,6 +12,7 @@ from finage.models import (
     PostEvidence,
     TickerEvidence,
     TrendingTicker,
+    WhaleRefreshChanges,
     WhaleSignal,
     WhaleSnapshot,
     WsbSnapshot,
@@ -409,6 +410,7 @@ async def test_digest_service_skips_congress_when_disabled(tmp_path: Path) -> No
 class FakeWhaleCollector:
     async def get_or_fetch(self):
         return WhaleSnapshot(
+            fetched_at=datetime(2026, 5, 27, tzinfo=UTC),
             signals=[
                 WhaleSignal(
                     ticker="NVDA",
@@ -426,6 +428,17 @@ class FakeWhaleCollector:
                     labels=["NEW POSITION", "WHALE + SOCIAL"],
                 )
             ]
+        )
+
+    def read_latest_changes(self):
+        return WhaleRefreshChanges(
+            generated_at=datetime(2026, 5, 27, tzinfo=UTC),
+            previous_fetched_at=datetime(2026, 5, 26, tzinfo=UTC),
+            current_fetched_at=datetime(2026, 5, 27, tzinfo=UTC),
+            new_filing_funds=["Berkshire Hathaway"],
+            new_signal_tickers=["NVDA"],
+            changed_signal_tickers=[],
+            dropped_signal_tickers=[],
         )
 
 
@@ -446,3 +459,6 @@ async def test_digest_service_appends_whale_context(tmp_path: Path) -> None:
 
     assert "--- WHALE 13F DATA ---" in llm.last_prompt
     assert "NVDA" in llm.last_prompt
+    assert "Whale Filing Updates" in llm.last_prompt
+    assert "Berkshire Hathaway" in llm.last_prompt
+    assert "Changes Since Last Refresh" in llm.last_prompt

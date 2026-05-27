@@ -13,6 +13,7 @@ from finage.models import (
     WhaleChange,
     WhaleFundSnapshot,
     WhaleHolding,
+    WhaleRefreshChanges,
     WhaleSignal,
     WhaleSnapshot,
 )
@@ -26,6 +27,7 @@ from finage.whale import (
     WHALE_WATCHLIST,
     WhaleAnalyzer,
     WhaleCollector,
+    format_whale_changes,
     normalize_whale_change,
     normalize_whale_holding,
 )
@@ -102,6 +104,21 @@ def test_whale_models_validate_expected_fields() -> None:
 
     assert snapshot.funds[0].holdings == [holding]
     assert snapshot.signals[0].labels == ["NEW POSITION", "WHALE + SOCIAL"]
+
+
+def test_whale_refresh_changes_model_validates_expected_fields() -> None:
+    changes = WhaleRefreshChanges(
+        generated_at=datetime(2026, 5, 27, tzinfo=UTC),
+        previous_fetched_at=datetime(2026, 5, 26, tzinfo=UTC),
+        current_fetched_at=datetime(2026, 5, 27, tzinfo=UTC),
+        new_filing_funds=["Berkshire Hathaway"],
+        new_signal_tickers=["NVDA"],
+        changed_signal_tickers=["TSLA"],
+        dropped_signal_tickers=["GME"],
+    )
+
+    assert changes.new_filing_funds == ["Berkshire Hathaway"]
+    assert changes.new_signal_tickers == ["NVDA"]
 
 
 def test_whale_settings_disable_feature_without_edgar_identity(tmp_path: Path) -> None:
@@ -303,6 +320,7 @@ async def test_whale_collector_refresh_persists_snapshot_and_ticker_files(tmp_pa
     assert snapshot.funds[0].holdings[0].ticker == "NVDA"
     assert (tmp_path / "whale" / "latest.json").exists()
     assert (tmp_path / "whale" / "signals.json").exists()
+    assert (tmp_path / "whale" / "latest_changes.json").exists()
     assert (tmp_path / "whale" / "by_fund" / "berkshire-hathaway.json").exists()
     assert (tmp_path / "whale" / "by_ticker" / "NVDA.json").exists()
 
@@ -484,6 +502,96 @@ def test_whale_analyzer_applies_social_and_congress_convergence() -> None:
     assert "WHALE + CONGRESS" in enriched[0].labels
 
 
+def test_whale_collector_writes_changes_against_previous_refresh(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, edgar_identity="finage@example.com")
+    collector = WhaleCollector(settings)
+    first = WhaleSnapshot(
+        fetched_at=datetime(2026, 5, 26, tzinfo=UTC),
+        funds=[
+            WhaleFundSnapshot(
+                slug="berkshire-hathaway",
+                fund_name="Berkshire Hathaway",
+                manager="Warren Buffett",
+                cik="1067983",
+                report_period=date(2026, 3, 31),
+                filing_accession="old-accession",
+            )
+        ],
+        signals=[
+            WhaleSignal(
+                ticker="TSLA",
+                total_score=3.0,
+                fund_count=1,
+                new_count=1,
+                increased_count=0,
+                decreased_count=0,
+                closed_count=0,
+                total_value_usd=10_000,
+                largest_position_fund="Berkshire Hathaway",
+                largest_position_value_usd=10_000,
+                funds=["Berkshire Hathaway"],
+                labels=["NEW POSITION"],
+            )
+        ],
+    )
+    second = WhaleSnapshot(
+        fetched_at=datetime(2026, 5, 27, tzinfo=UTC),
+        funds=[
+            WhaleFundSnapshot(
+                slug="berkshire-hathaway",
+                fund_name="Berkshire Hathaway",
+                manager="Warren Buffett",
+                cik="1067983",
+                report_period=date(2026, 6, 30),
+                filing_accession="new-accession",
+            )
+        ],
+        signals=[
+            WhaleSignal(
+                ticker="TSLA",
+                total_score=5.0,
+                fund_count=1,
+                new_count=1,
+                increased_count=1,
+                decreased_count=0,
+                closed_count=0,
+                total_value_usd=20_000,
+                largest_position_fund="Berkshire Hathaway",
+                largest_position_value_usd=20_000,
+                funds=["Berkshire Hathaway"],
+                labels=["NEW POSITION", "BIG ADD"],
+            ),
+            WhaleSignal(
+                ticker="NVDA",
+                total_score=4.0,
+                fund_count=1,
+                new_count=1,
+                increased_count=0,
+                decreased_count=0,
+                closed_count=0,
+                total_value_usd=30_000,
+                largest_position_fund="Berkshire Hathaway",
+                largest_position_value_usd=30_000,
+                funds=["Berkshire Hathaway"],
+                labels=["NEW POSITION"],
+            ),
+        ],
+    )
+
+    collector.persist(first)
+    collector.persist(second)
+    changes = collector.read_latest_changes()
+
+    assert changes is not None
+    assert changes.previous_fetched_at == first.fetched_at
+    assert changes.current_fetched_at == second.fetched_at
+    assert changes.new_filing_funds == ["Berkshire Hathaway"]
+    assert changes.new_signal_tickers == ["NVDA"]
+    assert changes.changed_signal_tickers == ["TSLA"]
+    assert changes.dropped_signal_tickers == []
+    assert "Berkshire Hathaway" in format_whale_changes(changes)
+
+
 def test_render_whale_ticker_prompt_includes_activity_and_caveat() -> None:
     prompt = render_whale_ticker_prompt(
         ticker="NVDA",
@@ -510,10 +618,16 @@ def test_render_whales_digest_prompt_preserves_precomputed_order() -> None:
 
 
 def test_render_whale_digest_prompt_builds_append_section() -> None:
-    prompt = render_whale_digest_prompt(signal_lines="- **NVDA** - WHALE + SOCIAL")
+    prompt = render_whale_digest_prompt(
+        signal_lines="- **NVDA** - WHALE + SOCIAL",
+        filing_updates="Berkshire Hathaway filed a new 13F.",
+        refresh_changes="New signals: NVDA",
+    )
 
     assert "--- WHALE 13F DATA ---" in prompt
     assert "## Whale Momentum" in prompt
+    assert "Berkshire Hathaway filed a new 13F." in prompt
+    assert "New signals: NVDA" in prompt
 
 
 def test_cli_parses_whale_refresh_command() -> None:
@@ -521,3 +635,13 @@ def test_cli_parses_whale_refresh_command() -> None:
 
     assert args.command == "whale"
     assert args.whale_command == "refresh"
+
+
+def test_cli_parses_whale_preview_and_send_commands() -> None:
+    preview = build_parser().parse_args(["whale", "preview"])
+    send = build_parser().parse_args(["whale", "send"])
+
+    assert preview.command == "whale"
+    assert preview.whale_command == "preview"
+    assert send.command == "whale"
+    assert send.whale_command == "send"

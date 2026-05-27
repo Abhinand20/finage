@@ -7,8 +7,9 @@ import sys
 
 from finage.congress import CongressCollector
 from finage.digest import DigestService
+from finage.analysis import MomentumAnalysisService
 from finage.settings import Settings
-from finage.telegram_bot import TelegramDigestBot, send_digest
+from finage.telegram_bot import TelegramDigestBot, send_digest, send_whale_brief
 from finage.whale import WhaleCollector
 
 
@@ -30,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     whale_parser = subparsers.add_parser("whale", help="Manage institutional 13F whale data")
     whale_subparsers = whale_parser.add_subparsers(dest="whale_command", required=True)
     whale_subparsers.add_parser("refresh", help="Fetch and persist latest 13F whale data")
+    whale_subparsers.add_parser("preview", help="Generate and print the whale momentum brief")
+    whale_subparsers.add_parser("send", help="Generate and send the whale momentum brief")
 
     return parser
 
@@ -42,7 +45,10 @@ async def _run_digest_command(settings: Settings, digest_command: str) -> int:
         return 0
 
     if digest_command == "send":
-        await send_digest(settings, result)
+        whale_followup = None
+        if settings.whale_enabled:
+            whale_followup = await MomentumAnalysisService(settings).whales()
+        await send_digest(settings, result, whale_followup=whale_followup)
         print(f"Sent digest to Telegram chat {settings.telegram_default_chat_id}")
         return 0
 
@@ -77,6 +83,16 @@ async def _run_whale_command(settings: Settings, whale_command: str) -> int:
             f"signals={len(snapshot.signals)} "
             f"cache={collector.base_dir}"
         )
+        return 0
+
+    if whale_command == "preview":
+        print(await MomentumAnalysisService(settings).whales())
+        return 0
+
+    if whale_command == "send":
+        brief = await MomentumAnalysisService(settings).whales()
+        await send_whale_brief(settings, brief)
+        print(f"Sent whale brief to Telegram chat {settings.telegram_default_chat_id}")
         return 0
 
     raise ValueError(f"Unsupported whale command: {whale_command}")

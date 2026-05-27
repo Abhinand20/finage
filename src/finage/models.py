@@ -186,3 +186,13 @@ class WhaleSnapshot(BaseModel):
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     funds: list[WhaleFundSnapshot] = Field(default_factory=list)
     signals: list[WhaleSignal] = Field(default_factory=list)
+
+
+class WhaleRefreshChanges(BaseModel):
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    previous_fetched_at: datetime | None = None
+    current_fetched_at: datetime
+    new_filing_funds: list[str] = Field(default_factory=list)
+    new_signal_tickers: list[str] = Field(default_factory=list)
+    changed_signal_tickers: list[str] = Field(default_factory=list)
+    dropped_signal_tickers: list[str] = Field(default_factory=list)

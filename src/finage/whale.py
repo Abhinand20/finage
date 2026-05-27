@@ -16,6 +16,7 @@ from finage.models import (
     WhaleChange,
     WhaleFundSnapshot,
     WhaleHolding,
+    WhaleRefreshChanges,
     WhaleSignal,
     WhaleSnapshot,
 )
@@ -244,6 +245,95 @@ class WhaleAnalyzer:
         )
 
 
+def compute_whale_refresh_changes(
+    previous: WhaleSnapshot | None,
+    current: WhaleSnapshot,
+    *,
+    generated_at: datetime | None = None,
+) -> WhaleRefreshChanges:
+    if previous is None:
+        return WhaleRefreshChanges(
+            generated_at=generated_at or current.fetched_at,
+            previous_fetched_at=None,
+            current_fetched_at=current.fetched_at,
+            new_filing_funds=[fund.fund_name for fund in current.funds],
+            new_signal_tickers=[signal.ticker for signal in current.signals],
+        )
+
+    previous_funds = {fund.slug: fund for fund in previous.funds}
+    new_filing_funds: list[str] = []
+    for fund in current.funds:
+        old = previous_funds.get(fund.slug)
+        if old is None or old.filing_accession != fund.filing_accession or old.report_period != fund.report_period:
+            new_filing_funds.append(fund.fund_name)
+
+    previous_signals = {signal.ticker: signal for signal in previous.signals}
+    current_signals = {signal.ticker: signal for signal in current.signals}
+    new_signal_tickers = sorted(set(current_signals) - set(previous_signals))
+    dropped_signal_tickers = sorted(set(previous_signals) - set(current_signals))
+    changed_signal_tickers = sorted(
+        ticker
+        for ticker in set(current_signals) & set(previous_signals)
+        if current_signals[ticker].labels != previous_signals[ticker].labels
+        or current_signals[ticker].fund_count != previous_signals[ticker].fund_count
+        or current_signals[ticker].total_score != previous_signals[ticker].total_score
+    )
+
+    return WhaleRefreshChanges(
+        generated_at=generated_at or current.fetched_at,
+        previous_fetched_at=previous.fetched_at,
+        current_fetched_at=current.fetched_at,
+        new_filing_funds=sorted(new_filing_funds),
+        new_signal_tickers=new_signal_tickers,
+        changed_signal_tickers=changed_signal_tickers,
+        dropped_signal_tickers=dropped_signal_tickers,
+    )
+
+
+def format_whale_changes(changes: WhaleRefreshChanges | None) -> str:
+    if changes is None:
+        return "No previous whale refresh comparison is available."
+
+    lines: list[str] = []
+    if changes.new_filing_funds:
+        lines.append(f"New or updated filings: {', '.join(changes.new_filing_funds[:10])}.")
+    else:
+        lines.append("No new fund filings since the previous successful whale refresh.")
+
+    detail_lines: list[str] = []
+    if changes.new_signal_tickers:
+        detail_lines.append(f"New signals: {', '.join(changes.new_signal_tickers[:15])}.")
+    if changes.changed_signal_tickers:
+        detail_lines.append(f"Changed signals: {', '.join(changes.changed_signal_tickers[:15])}.")
+    if changes.dropped_signal_tickers:
+        detail_lines.append(f"Dropped signals: {', '.join(changes.dropped_signal_tickers[:15])}.")
+    if not detail_lines:
+        detail_lines.append("No signal set changes since the previous successful whale refresh.")
+
+    return "\n".join(lines + detail_lines)
+
+
+def format_whale_filing_updates(snapshot: WhaleSnapshot, changes: WhaleRefreshChanges | None) -> str:
+    updated_names = set(changes.new_filing_funds) if changes else set()
+    updated_funds = [fund for fund in snapshot.funds if fund.fund_name in updated_names]
+    if updated_funds:
+        lines = [
+            f"- {fund.fund_name}: report {fund.report_period.isoformat()}"
+            + (f", accession {fund.filing_accession}" if fund.filing_accession else "")
+            for fund in sorted(updated_funds, key=lambda item: (item.report_period, item.fund_name), reverse=True)
+        ]
+        return "\n".join(lines)
+    if updated_names:
+        return "\n".join(f"- {name}: newly observed filing" for name in sorted(updated_names))
+
+    latest = sorted(snapshot.funds, key=lambda item: (item.report_period, item.fund_name), reverse=True)[:5]
+    if not latest:
+        return "No whale filings are available in the current cache."
+    return "No new fund filings since the previous successful whale refresh. Most recent cached filings:\n" + "\n".join(
+        f"- {fund.fund_name}: report {fund.report_period.isoformat()}" for fund in latest
+    )
+
+
 def _frame_records(frame: Any) -> list[dict[str, Any]]:
     if frame is None:
         return []
@@ -288,6 +378,10 @@ class WhaleCollector:
     def signals_path(self) -> Path:
         return self.base_dir / "signals.json"
 
+    @property
+    def latest_changes_path(self) -> Path:
+        return self.base_dir / "latest_changes.json"
+
     def _edgar(self) -> Any:
         if self.edgar_module is not None:
             return self.edgar_module
@@ -303,6 +397,11 @@ class WhaleCollector:
         if not self.latest_path.exists():
             return None
         return WhaleSnapshot.model_validate_json(self.latest_path.read_text(encoding="utf-8"))
+
+    def read_latest_changes(self) -> WhaleRefreshChanges | None:
+        if not self.latest_changes_path.exists():
+            return None
+        return WhaleRefreshChanges.model_validate_json(self.latest_changes_path.read_text(encoding="utf-8"))
 
     def _is_cache_fresh(self, snapshot: WhaleSnapshot) -> bool:
         age_hours = (self.now_provider() - snapshot.fetched_at).total_seconds() / 3600
@@ -376,11 +475,14 @@ class WhaleCollector:
         )
 
     def persist(self, snapshot: WhaleSnapshot) -> None:
+        previous = self.get_cached()
+        changes = compute_whale_refresh_changes(previous, snapshot, generated_at=self.now_provider())
         self._write_json(self.latest_path, snapshot.model_dump_json(indent=2))
         self._write_json(
             self.signals_path,
             json.dumps([signal.model_dump(mode="json") for signal in snapshot.signals], indent=2),
         )
+        self._write_json(self.latest_changes_path, changes.model_dump_json(indent=2))
         for fund in snapshot.funds:
             self._write_json(self.by_fund_dir / f"{fund.slug}.json", fund.model_dump_json(indent=2))
         self._write_ticker_files(snapshot)
