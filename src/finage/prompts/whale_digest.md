@@ -1,6 +1,13 @@
 --- WHALE 13F DATA ---
 Latest available Form 13F-HR filings for the curated top-10 fund watchlist. Signals and labels are precomputed by code; do not reorder tickers or invent additional funds.
 
+## Whale Filing Updates
+{filing_updates}
+
+## Changes Since Last Refresh
+{refresh_changes}
+
+## Whale Momentum
 {signal_lines}
 
 Instructions: After congressional activity, add a "## Whale Momentum" section.

@@ -117,13 +117,23 @@ async def send_markdown_text(bot: Bot, chat_id: int, text: str) -> None:
     )
 
 
-async def send_digest(settings: Settings, digest: DigestResult) -> None:
+async def send_digest(settings: Settings, digest: DigestResult, *, whale_followup: str | None = None) -> None:
     if settings.telegram_default_chat_id is None:
         raise ValueError("TELEGRAM_DEFAULT_CHAT_ID is required for `finage digest send`")
 
     logger.info("Sending generated digest to default Telegram chat_id=%s", settings.telegram_default_chat_id)
     async with Bot(token=settings.telegram_bot_token) as bot:
         await send_markdown_text(bot, settings.telegram_default_chat_id, digest.digest)
+        if whale_followup:
+            await send_markdown_text(bot, settings.telegram_default_chat_id, whale_followup)
+
+
+async def send_whale_brief(settings: Settings, brief: str) -> None:
+    if settings.telegram_default_chat_id is None:
+        raise ValueError("TELEGRAM_DEFAULT_CHAT_ID is required for `finage whale send`")
+
+    async with Bot(token=settings.telegram_bot_token) as bot:
+        await send_markdown_text(bot, settings.telegram_default_chat_id, brief)
 
 
 class TelegramDigestBot:
@@ -185,6 +195,9 @@ class TelegramDigestBot:
         try:
             result = await DigestService(self.settings).generate()
             await send_markdown_text(context.bot, update.effective_chat.id, result.digest)
+            if self.settings.whale_enabled:
+                whale_brief = await MomentumAnalysisService(self.settings).whales()
+                await send_markdown_text(context.bot, update.effective_chat.id, whale_brief)
             logger.info("Completed /digest request for chat_id=%s", chat_id)
         except Exception:
             logger.exception("Failed to generate digest")

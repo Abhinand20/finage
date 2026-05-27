@@ -10,7 +10,7 @@ from finage.llm import LlmProvider, create_llm_provider
 from finage.models import DigestResult, WsbSnapshot
 from finage.prompting import render_congress_digest_prompt, render_digest_prompt, render_whale_digest_prompt
 from finage.settings import Settings
-from finage.whale import WhaleAnalyzer, WhaleCollector
+from finage.whale import WhaleAnalyzer, WhaleCollector, format_whale_changes, format_whale_filing_updates
 from finage.web_search import (
     WebSearchOptions,
     WebSearchProvider,
@@ -36,6 +36,9 @@ class CongressDataSource(Protocol):
 
 class WhaleDataSource(Protocol):
     async def get_or_fetch(self):
+        ...
+
+    def read_latest_changes(self):
         ...
 
 
@@ -106,6 +109,7 @@ class DigestService:
             return ""
 
         analyzer = WhaleAnalyzer()
+        changes = self.whale_collector.read_latest_changes()
         signals = analyzer.apply_convergence(
             whale_snapshot.signals,
             reddit_tickers=snapshot.trending_tickers,
@@ -113,7 +117,11 @@ class DigestService:
         )
         lines = [analyzer.format_signal_line(signal) for signal in signals[:5]]
         signal_lines = "\n".join(lines) if lines else "No notable whale 13F momentum this period."
-        return render_whale_digest_prompt(signal_lines=signal_lines)
+        return render_whale_digest_prompt(
+            signal_lines=signal_lines,
+            filing_updates=format_whale_filing_updates(whale_snapshot, changes),
+            refresh_changes=format_whale_changes(changes),
+        )
 
     async def _web_search_by_ticker(self, snapshot: WsbSnapshot) -> dict[str, WebSearchResponse]:
         if not self.web_search_provider or not self.settings.digest_web_search_enabled:
