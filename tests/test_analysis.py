@@ -1,3 +1,4 @@
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,21 @@ from finage.analysis import (
     format_ticker_brief,
     normalize_ticker_symbol,
 )
-from finage.models import CommentEvidence, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.congress import normalize_congress_trade
+from finage.models import (
+    CongressSnapshot,
+    CongressTrade,
+    CommentEvidence,
+    PostEvidence,
+    TickerEvidence,
+    TrendingTicker,
+    WhaleChange,
+    WhaleFundSnapshot,
+    WhaleHolding,
+    WhaleSignal,
+    WhaleSnapshot,
+    WsbSnapshot,
+)
 from finage.settings import Settings
 
 
@@ -37,16 +52,18 @@ class FakeHealthCollector(FakeCollector):
         return self.trending
 
 
-def make_settings(tmp_path: Path) -> Settings:
-    return Settings(
-        reddit_client_id="reddit-id",
-        reddit_client_secret="reddit-secret",
-        telegram_bot_token="telegram-token",
-        telegram_allowed_ids=[123],
-        telegram_default_chat_id=123,
-        gemini_api_key="gemini-key",
-        data_dir=tmp_path,
-    )
+def make_settings(tmp_path: Path, **overrides) -> Settings:
+    values = {
+        "reddit_client_id": "reddit-id",
+        "reddit_client_secret": "reddit-secret",
+        "telegram_bot_token": "telegram-token",
+        "telegram_allowed_ids": [123],
+        "telegram_default_chat_id": 123,
+        "gemini_api_key": "gemini-key",
+        "data_dir": tmp_path,
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 class FakeLlm:
@@ -388,3 +405,195 @@ async def test_health_service_reports_failures_without_network_call_requirements
     assert "`FAIL` **Telegram allowlist**" in report
     assert "`FAIL` **Collection settings**" in report
     assert "`WARN` **ApeWisdom**: Trending check skipped for injected collector" in report
+
+
+class FakeCongressCollector:
+    def __init__(self, trades: list[CongressTrade]):
+        self.snapshot = CongressSnapshot(
+            fetched_at=datetime(2026, 5, 21, tzinfo=UTC),
+            total_trades=len(trades),
+            new_trades=len(trades),
+            corrected_trades=0,
+            last_successful_fetch_at=datetime(2026, 5, 21, tzinfo=UTC),
+            trades=trades,
+        )
+        self.new_trades = trades
+
+    async def get_or_fetch(self):
+        return self.snapshot
+
+    def read_new_trades(self):
+        return self.new_trades
+
+    def trades_for_ticker(self, snapshot, ticker: str):
+        return [trade for trade in snapshot.trades if trade.ticker == ticker.upper()]
+
+
+def make_congress_trade(ticker: str = "TSLA") -> CongressTrade:
+    return normalize_congress_trade(
+        {
+            "symbol": ticker,
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "transactionDate": "2026-05-01",
+            "disclosureDate": "2026-05-20",
+            "type": "Purchase",
+            "amount": "$100,001 - $250,000",
+            "assetDescription": f"{ticker} Inc.",
+        },
+        chamber="House",
+        seen_at=datetime(2026, 5, 21, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_senate_service_calls_llm_with_congress_prompt(tmp_path: Path) -> None:
+    llm = FakeLlm()
+    service = MomentumAnalysisService(
+        make_settings(tmp_path),
+        collector=FakeHealthCollector(make_snapshot(), trending=make_snapshot().trending_tickers),
+        llm_provider=llm,
+        congress_collector=FakeCongressCollector([make_congress_trade("TSLA")]),
+    )
+
+    result = await service.senate("tsla")
+
+    assert result.startswith("**Congressional Activity: TSLA**")
+    assert llm.calls == 1
+    assert "congressional trading disclosures for TSLA" in llm.last_prompt
+    assert "Jane Doe" in llm.last_prompt
+    assert "ApeWisdom Reddit rank: #1" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_senate_service_calls_llm_when_no_trades_exist(tmp_path: Path) -> None:
+    llm = FakeLlm()
+    service = MomentumAnalysisService(
+        make_settings(tmp_path),
+        collector=FakeHealthCollector(make_snapshot(), trending=make_snapshot().trending_tickers),
+        llm_provider=llm,
+        congress_collector=FakeCongressCollector([]),
+    )
+
+    result = await service.senate("nvda")
+
+    assert result.startswith("**Congressional Activity: NVDA**")
+    assert "No congressional trades found in local history." in llm.last_prompt
+
+
+class FakeWhaleCollector:
+    def __init__(self, snapshot: WhaleSnapshot, activities: list[dict] | None = None):
+        self.snapshot = snapshot
+        self.activities = activities or []
+
+    async def get_or_fetch(self) -> WhaleSnapshot:
+        return self.snapshot
+
+    def activities_for_ticker(self, ticker: str) -> list[dict]:
+        return self.activities if ticker.upper() == "NVDA" else []
+
+
+def make_whale_snapshot() -> WhaleSnapshot:
+    return WhaleSnapshot(
+        fetched_at=datetime(2026, 5, 26, tzinfo=UTC),
+        funds=[
+            WhaleFundSnapshot(
+                slug="berkshire-hathaway",
+                fund_name="Berkshire Hathaway",
+                manager="Warren Buffett",
+                cik="1067983",
+                report_period=date(2026, 3, 31),
+                total_holdings=1,
+                total_value_usd=100_000_000,
+                holdings=[WhaleHolding(ticker="NVDA", shares=100, value_usd=100_000_000)],
+                changes=[
+                    WhaleChange(
+                        status="NEW",
+                        ticker="NVDA",
+                        shares_delta=100,
+                        shares_delta_pct=None,
+                        value_delta_usd=100_000_000,
+                        prior_shares=0,
+                        prior_value_usd=0,
+                        current_shares=100,
+                        current_value_usd=100_000_000,
+                    )
+                ],
+                fetched_at=datetime(2026, 5, 26, tzinfo=UTC),
+            )
+        ],
+        signals=[
+            WhaleSignal(
+                ticker="NVDA",
+                total_score=6.0,
+                fund_count=1,
+                new_count=1,
+                increased_count=0,
+                decreased_count=0,
+                closed_count=0,
+                total_value_usd=100_000_000,
+                largest_position_fund="Berkshire Hathaway",
+                largest_position_value_usd=100_000_000,
+                funds=["Berkshire Hathaway"],
+                labels=["NEW POSITION"],
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_whale_service_calls_llm_with_ticker_prompt(tmp_path: Path) -> None:
+    llm = FakeLlm()
+    service = MomentumAnalysisService(
+        make_settings(tmp_path, edgar_identity="finage@example.com"),
+        collector=FakeCollector(WsbSnapshot(subreddit="wallstreetbets", trending_tickers=[])),
+        llm_provider=llm,
+        whale_collector=FakeWhaleCollector(
+            make_whale_snapshot(),
+            activities=[
+                {
+                    "fund": "Berkshire Hathaway",
+                    "manager": "Warren Buffett",
+                    "report_period": "2026-03-31",
+                    "holding": {"ticker": "NVDA", "value_usd": 100_000_000, "shares": 100},
+                    "change": {"status": "NEW", "value_delta_usd": 100_000_000},
+                }
+            ],
+        ),
+    )
+
+    response = await service.whale("NVDA")
+
+    assert response.startswith("**Whale Activity: NVDA**")
+    assert llm.calls == 1
+    assert "Berkshire Hathaway" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_whales_service_calls_llm_with_top_signals(tmp_path: Path) -> None:
+    llm = FakeLlm()
+    service = MomentumAnalysisService(
+        make_settings(tmp_path, edgar_identity="finage@example.com"),
+        collector=FakeCollector(WsbSnapshot(subreddit="wallstreetbets", trending_tickers=[])),
+        llm_provider=llm,
+        whale_collector=FakeWhaleCollector(make_whale_snapshot()),
+    )
+
+    response = await service.whales()
+
+    assert response.startswith("**Whale Momentum**")
+    assert llm.calls == 1
+    assert "NVDA" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_live_service_adds_congress_badge(tmp_path: Path) -> None:
+    service = MomentumAnalysisService(
+        make_settings(tmp_path, fmp_api_key="fmp-key"),
+        collector=FakeCollector(make_snapshot()),
+        congress_collector=FakeCongressCollector([make_congress_trade("TSLA")]),
+    )
+
+    result = await service.live()
+
+    assert "**TSLA** #1 🏛️" in result

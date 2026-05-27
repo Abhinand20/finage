@@ -1,11 +1,22 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from finage.digest import DigestService, build_digest_payload, build_digest_prompt
-from finage.models import DigestResult, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
-from finage.prompting import build_ticker_why_payload, render_digest_prompt, render_ticker_why_prompt
+from finage.congress import normalize_congress_trade
+from finage.digest import DigestService, build_digest_prompt
+from finage.models import (
+    CongressSnapshot,
+    DigestResult,
+    PostEvidence,
+    TickerEvidence,
+    TrendingTicker,
+    WhaleSignal,
+    WhaleSnapshot,
+    WsbSnapshot,
+)
+from finage.prompting import build_digest_payload, build_ticker_why_payload, render_digest_prompt, render_ticker_why_prompt
 from finage.settings import Settings
 from finage.web_search import WebSearchResponse, WebSearchResult
 
@@ -326,3 +337,112 @@ async def test_digest_service_continues_when_web_search_fails(tmp_path: Path) ->
     assert "TSLA" in result.digest
     assert "TSLA catalyst thread" in llm.last_prompt
     assert "web_search" not in llm.last_prompt
+
+
+class FakeCongressCollector:
+    def __init__(self, snapshot: CongressSnapshot, new_trades):
+        self.snapshot = snapshot
+        self.new_trades = new_trades
+
+    async def get_or_fetch(self) -> CongressSnapshot:
+        return self.snapshot
+
+    def read_new_trades(self):
+        return self.new_trades
+
+
+@pytest.mark.asyncio
+async def test_digest_service_appends_congress_context(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.fmp_api_key = "fmp-key"
+    settings.congress_enabled = True
+    trade = normalize_congress_trade(
+        {
+            "symbol": "TSLA",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "transactionDate": "2026-05-01",
+            "disclosureDate": "2026-05-20",
+            "type": "Purchase",
+            "amount": "$100,001 - $250,000",
+            "assetDescription": "Tesla Inc.",
+        },
+        chamber="House",
+        seen_at=datetime(2026, 5, 21, tzinfo=UTC),
+    )
+    snapshot = CongressSnapshot(
+        fetched_at=datetime(2026, 5, 21, tzinfo=UTC),
+        total_trades=1,
+        new_trades=1,
+        corrected_trades=0,
+        last_successful_fetch_at=datetime(2026, 5, 21, tzinfo=UTC),
+        trades=[trade],
+    )
+    llm = FakeLlm()
+    service = DigestService(
+        settings,
+        collector=FakeCollector(make_snapshot()),
+        llm_provider=llm,
+        congress_collector=FakeCongressCollector(snapshot, [trade]),
+    )
+
+    await service.generate()
+
+    assert "CONGRESSIONAL TRADING DATA" in llm.last_prompt
+    assert "TSLA" in llm.last_prompt
+    assert "NEW" in llm.last_prompt
+    assert "CONVERGENCE" in llm.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_digest_service_skips_congress_when_disabled(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.congress_enabled = False
+    llm = FakeLlm()
+    service = DigestService(settings, collector=FakeCollector(make_snapshot()), llm_provider=llm)
+
+    await service.generate()
+
+    assert "CONGRESSIONAL TRADING DATA" not in llm.last_prompt
+
+
+class FakeWhaleCollector:
+    async def get_or_fetch(self):
+        return WhaleSnapshot(
+            signals=[
+                WhaleSignal(
+                    ticker="NVDA",
+                    total_score=6.0,
+                    fund_count=1,
+                    new_count=1,
+                    increased_count=0,
+                    decreased_count=0,
+                    closed_count=0,
+                    total_value_usd=100_000_000,
+                    largest_position_fund="Berkshire Hathaway",
+                    largest_position_value_usd=100_000_000,
+                    funds=["Berkshire Hathaway"],
+                    has_social_overlap=True,
+                    labels=["NEW POSITION", "WHALE + SOCIAL"],
+                )
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_digest_service_appends_whale_context(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.edgar_identity = "finage@example.com"
+    settings.whale_enabled = True
+    llm = FakeLlm()
+    service = DigestService(
+        settings,
+        collector=FakeCollector(make_snapshot()),
+        llm_provider=llm,
+        whale_collector=FakeWhaleCollector(),
+    )
+
+    await service.generate()
+
+    assert "--- WHALE 13F DATA ---" in llm.last_prompt
+    assert "NVDA" in llm.last_prompt

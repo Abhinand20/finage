@@ -10,10 +10,17 @@ from typing import Protocol
 
 from finage.artifacts import ArtifactStore, LATEST_DIGEST_FILENAME, LATEST_SNAPSHOT_FILENAME
 from finage.collector import WsbCollector
+from finage.congress import CongressAnalyzer, CongressCollector
 from finage.llm import LlmProvider, create_llm_provider
-from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
-from finage.prompting import render_ticker_why_prompt
+from finage.models import CongressTrade, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.prompting import (
+    render_congress_ticker_prompt,
+    render_ticker_why_prompt,
+    render_whale_ticker_prompt,
+    render_whales_digest_prompt,
+)
 from finage.settings import Settings
+from finage.whale import WHALE_WATCHLIST, WhaleAnalyzer, WhaleCollector
 
 logger = logging.getLogger(__name__)
 TICKER_RE = re.compile(r"^\$?[A-Za-z]{1,5}$")
@@ -377,7 +384,33 @@ def format_movers_brief(current: WsbSnapshot, previous: WsbSnapshot | None, *, l
     return "\n".join(lines)
 
 
-def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
+def _format_congress_trade_line(trade: CongressTrade) -> str:
+    return (
+        f"- {trade.disclosure_date.isoformat()}: {trade.representative} "
+        f"{trade.transaction_type.lower()} {trade.amount} of {trade.ticker} "
+        f"({trade.chamber}; transaction {trade.transaction_date.isoformat()}; "
+        f"{trade.disclosure_lag_days}d disclosure lag)"
+    )
+
+
+def _format_whale_activity_line(activity: dict) -> str:
+    holding = activity.get("holding") or {}
+    change = activity.get("change") or {}
+    status = change.get("status", "HELD")
+    value = holding.get("value_usd") or change.get("current_value_usd") or 0
+    delta = change.get("value_delta_usd")
+    delta_text = f", delta ${delta:,}" if isinstance(delta, int) else ""
+    return (
+        f"- {activity.get('fund')} ({activity.get('manager')}), report {activity.get('report_period')}: "
+        f"{status} position worth ${value:,}{delta_text}"
+    )
+
+
+def _watchlist_summary() -> str:
+    return ", ".join(f"{fund.fund_name} ({fund.manager})" for fund in WHALE_WATCHLIST)
+
+
+def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5, congress_badges: set[str] | None = None) -> str:
     """Build a deterministic Telegram-ready brief for the latest social momentum scan."""
 
     source_scope = ", ".join(f"r/{name}" for name in (snapshot.subreddits or [snapshot.subreddit]))
@@ -404,16 +437,17 @@ def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
 
     for trending in ranked_tickers:
         evidence = evidence_by_ticker.get(trending.ticker)
+        badge = " 🏛️" if congress_badges and trending.ticker in congress_badges else ""
         if evidence is None:
             lines.append(
-                f"- **{trending.ticker}** #{trending.rank}: "
+                f"- **{trending.ticker}** #{trending.rank}{badge}: "
                 f"{_format_int(trending.mentions)} mentions, {_format_int(trending.upvotes)} upvotes. "
                 "No qualifying Reddit evidence found in the configured scan."
             )
             continue
 
         lines.append(
-            f"- **{evidence.ticker}** #{trending.rank}: "
+            f"- **{evidence.ticker}** #{trending.rank}{badge}: "
             f"{_format_int(trending.mentions)} mentions, {_format_int(trending.upvotes)} upvotes, "
             f"evidence score {_format_int(evidence.evidence_score)} across {_subreddit_summary(evidence)}. "
             f"Top thread: {_top_post_summary(evidence)}"
@@ -450,11 +484,34 @@ class MomentumAnalysisService:
         collector: Collector | None = None,
         artifact_store: ArtifactStore | None = None,
         llm_provider: LlmProvider | None = None,
+        congress_collector=None,
+        whale_collector=None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
         self.llm_provider = llm_provider or create_llm_provider(settings)
+        self.congress_collector = congress_collector or CongressCollector(settings)
+        self.whale_collector = whale_collector or WhaleCollector(settings)
+
+    async def _congress_badges_for_snapshot(self, snapshot: WsbSnapshot) -> set[str]:
+        if not self.settings.congress_enabled:
+            return set()
+        try:
+            congress_snapshot = await self.congress_collector.get_or_fetch()
+            new_trades = self.congress_collector.read_new_trades()
+        except Exception:
+            logger.exception("Congress badge lookup failed")
+            return set()
+        analyzer = CongressAnalyzer()
+        signals = analyzer.top_signals(
+            congress_snapshot.trades,
+            new_trades=new_trades,
+            lookback_days=self.settings.congress_lookback_days,
+            min_score=self.settings.congress_min_signal_score,
+        )
+        social = {item.ticker for item in snapshot.trending_tickers[:10]}
+        return {signal.ticker for signal in signals if signal.ticker in social}
 
     async def live(self) -> str:
         logger.info("Starting live momentum scan")
@@ -464,7 +521,8 @@ class MomentumAnalysisService:
             len(snapshot.trending_tickers),
             len(snapshot.ticker_evidence),
         )
-        return format_live_brief(snapshot)
+        congress_badges = await self._congress_badges_for_snapshot(snapshot)
+        return format_live_brief(snapshot, congress_badges=congress_badges)
 
     async def ticker(self, symbol: str) -> str:
         ticker = normalize_ticker_symbol(symbol)
@@ -623,3 +681,92 @@ class MomentumAnalysisService:
 
         logger.info("Health check complete with statuses=%s", dict(Counter(check.status for check in checks)))
         return format_health_report(checks)
+
+    async def senate(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        logger.info("Starting senate scan for ticker=%s", ticker)
+        try:
+            congress_snapshot = await self.congress_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Congress data unavailable for ticker=%s", ticker)
+            return (
+                "Congressional data unavailable. FMP could not be reached and no local cache is available."
+            )
+
+        trades = self.congress_collector.trades_for_ticker(congress_snapshot, ticker)
+        fetch_trending = getattr(self.collector, "fetch_trending_tickers", None)
+        trending: list[TrendingTicker] = []
+        if fetch_trending is not None:
+            try:
+                trending = await fetch_trending()
+            except Exception:
+                logger.exception("ApeWisdom rank lookup failed for senate ticker=%s", ticker)
+        rank_by_ticker = {item.ticker: item.rank for item in trending}
+        reddit_rank = (
+            f"#{rank_by_ticker[ticker]}"
+            if ticker in rank_by_ticker
+            else f"not in top {self.settings.wsb_ticker_limit}"
+        )
+
+        if trades:
+            trades_formatted = "\n".join(_format_congress_trade_line(trade) for trade in trades[:25])
+            asset_description = trades[0].asset_description
+        else:
+            trades_formatted = "No congressional trades found in local history."
+            asset_description = ticker
+
+        prompt = render_congress_ticker_prompt(
+            ticker=ticker,
+            asset_description=asset_description,
+            trades_formatted=trades_formatted,
+            reddit_rank=reddit_rank,
+            ticker_limit=self.settings.wsb_ticker_limit,
+        )
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Congressional Activity: {ticker}**\n{explanation.strip()}"
+
+    async def whale(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        if not self.settings.whale_enabled:
+            return "Whale tracking is disabled. Set EDGAR_IDENTITY to enable SEC 13F tracking."
+        try:
+            snapshot = await self.whale_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Whale data unavailable for ticker=%s", ticker)
+            return "Whale data unavailable. SEC EDGAR could not be reached and no local cache is available."
+
+        activities = self.whale_collector.activities_for_ticker(ticker)
+        signal = next((item for item in snapshot.signals if item.ticker == ticker), None)
+        fund_lines = (
+            "\n".join(_format_whale_activity_line(activity) for activity in activities[:25])
+            if activities
+            else "No top-10 whale activity found in local 13F history."
+        )
+        labels = signal.labels if signal else []
+        prompt = render_whale_ticker_prompt(
+            ticker=ticker,
+            asset_description=ticker,
+            watchlist_summary=_watchlist_summary(),
+            fund_lines=fund_lines,
+            labels=labels,
+            reddit_rank="not checked for this request",
+            congress_summary="not checked for this request",
+        )
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Whale Activity: {ticker}**\n{explanation.strip()}"
+
+    async def whales(self, top_n: int = 5) -> str:
+        if not self.settings.whale_enabled:
+            return "Whale tracking is disabled. Set EDGAR_IDENTITY to enable SEC 13F tracking."
+        try:
+            snapshot = await self.whale_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Whale momentum data unavailable")
+            return "Whale data unavailable. SEC EDGAR could not be reached and no local cache is available."
+
+        analyzer = WhaleAnalyzer()
+        lines = [analyzer.format_signal_line(signal) for signal in snapshot.signals[:top_n]]
+        signal_lines = "\n".join(lines) if lines else "No notable whale 13F momentum this period."
+        prompt = render_whales_digest_prompt(signal_lines=signal_lines, top_n=top_n)
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Whale Momentum**\n{explanation.strip()}"

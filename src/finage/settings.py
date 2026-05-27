@@ -88,6 +88,20 @@ class Settings(BaseModel):
     web_search_timeout_seconds: int = 15
     digest_web_search_enabled: bool = False
 
+    fmp_api_key: str | None = None
+    congress_lookback_days: int = 30
+    congress_bootstrap_days: int = 180
+    congress_max_pages_per_refresh: int = 4
+    congress_cache_ttl_hours: int = 12
+    congress_min_signal_score: float = 2.0
+    congress_enabled: bool = True
+
+    edgar_identity: str | None = None
+    whale_lookback_quarters: int = 2
+    whale_cache_ttl_hours: int = 24
+    whale_min_signal_score: float = 2.0
+    whale_enabled: bool = True
+
     def model_post_init(self, __context: Any) -> None:
         # Auto-derived values should not enter model_fields_set; that lets an
         # explicit DIGEST_WEB_SEARCH_ENABLED=false override Exa auto-enable.
@@ -99,6 +113,10 @@ class Settings(BaseModel):
             and "digest_web_search_enabled" not in self.model_fields_set
         ):
             object.__setattr__(self, "digest_web_search_enabled", True)
+        if not self.fmp_api_key:
+            object.__setattr__(self, "congress_enabled", False)
+        if not self.edgar_identity:
+            object.__setattr__(self, "whale_enabled", False)
 
     @field_validator("digest_prompt_bundle")
     @classmethod
@@ -143,6 +161,16 @@ class Settings(BaseModel):
             "web_search_content_mode": _optional_str(os.getenv("WEB_SEARCH_CONTENT_MODE"))
             or "highlights",
             "web_search_timeout_seconds": _int_env("WEB_SEARCH_TIMEOUT_SECONDS", 15),
+            "fmp_api_key": _optional_str(os.getenv("FMP_API_KEY")),
+            "congress_lookback_days": _int_env("CONGRESS_LOOKBACK_DAYS", 30),
+            "congress_bootstrap_days": _int_env("CONGRESS_BOOTSTRAP_DAYS", 180),
+            "congress_max_pages_per_refresh": _int_env("CONGRESS_MAX_PAGES_PER_REFRESH", 4),
+            "congress_cache_ttl_hours": _int_env("CONGRESS_CACHE_TTL_HOURS", 12),
+            "congress_min_signal_score": float(os.getenv("CONGRESS_MIN_SIGNAL_SCORE", "2.0")),
+            "edgar_identity": _optional_str(os.getenv("EDGAR_IDENTITY")),
+            "whale_lookback_quarters": _int_env("WHALE_LOOKBACK_QUARTERS", 2),
+            "whale_cache_ttl_hours": _int_env("WHALE_CACHE_TTL_HOURS", 24),
+            "whale_min_signal_score": float(os.getenv("WHALE_MIN_SIGNAL_SCORE", "2.0")),
         }
 
         digest_raw = os.getenv("DIGEST_WEB_SEARCH_ENABLED")
