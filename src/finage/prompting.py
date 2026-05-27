@@ -163,6 +163,39 @@ Evidence JSON:
 """
 
 
+def render_congress_digest_prompt(
+    *,
+    congress_section_markdown: str,
+    lookback_days: int,
+    overlap_tickers: list[str],
+) -> str:
+    template = resources.files("finage.prompts").joinpath("congress_digest.md").read_text(encoding="utf-8")
+    overlap_list = ", ".join(overlap_tickers) if overlap_tickers else "None"
+    return template.format(
+        congress_section_markdown=congress_section_markdown,
+        lookback_days=lookback_days,
+        overlap_list=overlap_list,
+    )
+
+
+def render_congress_ticker_prompt(
+    *,
+    ticker: str,
+    asset_description: str,
+    trades_formatted: str,
+    reddit_rank: str,
+    ticker_limit: int,
+) -> str:
+    template = resources.files("finage.prompts").joinpath("congress_ticker.md").read_text(encoding="utf-8")
+    return template.format(
+        ticker=ticker,
+        asset_description=asset_description,
+        trades_formatted=trades_formatted,
+        reddit_rank=reddit_rank,
+        ticker_limit=ticker_limit,
+    )
+
+
 def load_digest_prompt_template(
     prompt_template_path: Path | None = None,
     *,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -65,3 +66,65 @@ class TelegramMessage(BaseModel):
     text: str
     parse_mode: str | None = None
     disable_web_page_preview: bool = True
+
+
+class CongressTrade(BaseModel):
+    trade_id: str
+    source_hash: str
+    ticker: str
+    asset_description: str
+    representative: str
+    chamber: Literal["Senate", "House"]
+    transaction_type: Literal["Bought", "Sold", "Exchange"]
+    raw_type: str
+    amount: str
+    amount_min: int | None = None
+    amount_max: int | None = None
+    amount_midpoint: int | None = None
+    raw_amount: str
+    transaction_date: date
+    disclosure_date: date
+    disclosure_lag_days: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+class CongressSnapshot(BaseModel):
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    total_trades: int = 0
+    new_trades: int = 0
+    corrected_trades: int = 0
+    last_successful_fetch_at: datetime | None = None
+    trades: list[CongressTrade] = Field(default_factory=list)
+
+
+class CongressFetchMetadata(BaseModel):
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_successful_fetch_at: datetime | None = None
+    senate_pages: int = 0
+    house_pages: int = 0
+    total_records: int = 0
+    new_trades: int = 0
+    corrected_trades: int = 0
+
+
+class CongressSignal(BaseModel):
+    ticker: str
+    asset_description: str
+    total_score: float
+    net_buy_score: float
+    buy_count: int
+    sell_count: int
+    trade_count: int
+    new_trade_count: int
+    unique_politicians: int
+    total_bought_value_midpoint: int
+    total_sold_value_midpoint: int
+    largest_amount: str
+    politicians: list[str] = Field(default_factory=list)
+    latest_disclosure: date
+    days_since_disclosure: int
+    avg_disclosure_lag_days: float
+    is_cluster: bool
+    is_bicameral: bool
+    convergence_score: float | None = None

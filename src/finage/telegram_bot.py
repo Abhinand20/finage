@@ -141,6 +141,7 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("ticker", self.ticker))
         application.add_handler(CommandHandler("why", self.why))
         application.add_handler(CommandHandler("movers", self.movers))
+        application.add_handler(CommandHandler("senate", self.senate))
         application.add_handler(CommandHandler("health", self.health))
         application.run_polling()
 
@@ -150,7 +151,8 @@ class TelegramDigestBot:
         await update.effective_message.reply_text(
             "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
             "/ticker TSLA for focused ticker evidence, /why TSLA for an explanation, "
-            "/movers for changes versus the latest digest, or /health for bot status."
+            "/senate TSLA for congressional trading analysis, /movers for changes versus the latest digest, "
+            "or /health for bot status."
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -162,6 +164,7 @@ class TelegramDigestBot:
             "/live - run a fresh social momentum scan and return a compact market brief.\n"
             "/ticker <stock> - run a fresh scan and return focused evidence for one ticker.\n"
             "/why <stock> - explain the strongest narratives behind one ticker using Gemini.\n"
+            "/senate <stock> - analyze Senate and House trading disclosures for one ticker.\n"
             "/movers - compare a fresh scan against the latest saved digest snapshot.\n"
             "/health - check config, artifacts, data directory, and ApeWisdom reachability."
         )
@@ -249,6 +252,32 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate why brief")
             await update.effective_message.reply_text("Why analysis failed. Check the Pi logs.")
+
+    async def senate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /senate TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc).replace("/ticker", "/senate"))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /senate request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Analyzing congressional trades for {symbol}...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).senate(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /senate request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate senate brief")
+            await update.effective_message.reply_text("Senate analysis failed. Check the Pi logs.")
 
     async def movers(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):

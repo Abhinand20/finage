@@ -10,9 +10,10 @@ from typing import Protocol
 
 from finage.artifacts import ArtifactStore, LATEST_DIGEST_FILENAME, LATEST_SNAPSHOT_FILENAME
 from finage.collector import WsbCollector
+from finage.congress import CongressAnalyzer, CongressCollector
 from finage.llm import LlmProvider, create_llm_provider
-from finage.models import PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
-from finage.prompting import render_ticker_why_prompt
+from finage.models import CongressTrade, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
+from finage.prompting import render_congress_ticker_prompt, render_ticker_why_prompt
 from finage.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -377,7 +378,16 @@ def format_movers_brief(current: WsbSnapshot, previous: WsbSnapshot | None, *, l
     return "\n".join(lines)
 
 
-def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
+def _format_congress_trade_line(trade: CongressTrade) -> str:
+    return (
+        f"- {trade.disclosure_date.isoformat()}: {trade.representative} "
+        f"{trade.transaction_type.lower()} {trade.amount} of {trade.ticker} "
+        f"({trade.chamber}; transaction {trade.transaction_date.isoformat()}; "
+        f"{trade.disclosure_lag_days}d disclosure lag)"
+    )
+
+
+def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5, congress_badges: set[str] | None = None) -> str:
     """Build a deterministic Telegram-ready brief for the latest social momentum scan."""
 
     source_scope = ", ".join(f"r/{name}" for name in (snapshot.subreddits or [snapshot.subreddit]))
@@ -404,16 +414,17 @@ def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5) -> str:
 
     for trending in ranked_tickers:
         evidence = evidence_by_ticker.get(trending.ticker)
+        badge = " 🏛️" if congress_badges and trending.ticker in congress_badges else ""
         if evidence is None:
             lines.append(
-                f"- **{trending.ticker}** #{trending.rank}: "
+                f"- **{trending.ticker}** #{trending.rank}{badge}: "
                 f"{_format_int(trending.mentions)} mentions, {_format_int(trending.upvotes)} upvotes. "
                 "No qualifying Reddit evidence found in the configured scan."
             )
             continue
 
         lines.append(
-            f"- **{evidence.ticker}** #{trending.rank}: "
+            f"- **{evidence.ticker}** #{trending.rank}{badge}: "
             f"{_format_int(trending.mentions)} mentions, {_format_int(trending.upvotes)} upvotes, "
             f"evidence score {_format_int(evidence.evidence_score)} across {_subreddit_summary(evidence)}. "
             f"Top thread: {_top_post_summary(evidence)}"
@@ -450,11 +461,32 @@ class MomentumAnalysisService:
         collector: Collector | None = None,
         artifact_store: ArtifactStore | None = None,
         llm_provider: LlmProvider | None = None,
+        congress_collector=None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
         self.llm_provider = llm_provider or create_llm_provider(settings)
+        self.congress_collector = congress_collector or CongressCollector(settings)
+
+    async def _congress_badges_for_snapshot(self, snapshot: WsbSnapshot) -> set[str]:
+        if not self.settings.congress_enabled:
+            return set()
+        try:
+            congress_snapshot = await self.congress_collector.get_or_fetch()
+            new_trades = self.congress_collector.read_new_trades()
+        except Exception:
+            logger.exception("Congress badge lookup failed")
+            return set()
+        analyzer = CongressAnalyzer()
+        signals = analyzer.top_signals(
+            congress_snapshot.trades,
+            new_trades=new_trades,
+            lookback_days=self.settings.congress_lookback_days,
+            min_score=self.settings.congress_min_signal_score,
+        )
+        social = {item.ticker for item in snapshot.trending_tickers[:10]}
+        return {signal.ticker for signal in signals if signal.ticker in social}
 
     async def live(self) -> str:
         logger.info("Starting live momentum scan")
@@ -464,7 +496,8 @@ class MomentumAnalysisService:
             len(snapshot.trending_tickers),
             len(snapshot.ticker_evidence),
         )
-        return format_live_brief(snapshot)
+        congress_badges = await self._congress_badges_for_snapshot(snapshot)
+        return format_live_brief(snapshot, congress_badges=congress_badges)
 
     async def ticker(self, symbol: str) -> str:
         ticker = normalize_ticker_symbol(symbol)
@@ -623,3 +656,46 @@ class MomentumAnalysisService:
 
         logger.info("Health check complete with statuses=%s", dict(Counter(check.status for check in checks)))
         return format_health_report(checks)
+
+    async def senate(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        logger.info("Starting senate scan for ticker=%s", ticker)
+        try:
+            congress_snapshot = await self.congress_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Congress data unavailable for ticker=%s", ticker)
+            return (
+                "Congressional data unavailable. FMP could not be reached and no local cache is available."
+            )
+
+        trades = self.congress_collector.trades_for_ticker(congress_snapshot, ticker)
+        fetch_trending = getattr(self.collector, "fetch_trending_tickers", None)
+        trending: list[TrendingTicker] = []
+        if fetch_trending is not None:
+            try:
+                trending = await fetch_trending()
+            except Exception:
+                logger.exception("ApeWisdom rank lookup failed for senate ticker=%s", ticker)
+        rank_by_ticker = {item.ticker: item.rank for item in trending}
+        reddit_rank = (
+            f"#{rank_by_ticker[ticker]}"
+            if ticker in rank_by_ticker
+            else f"not in top {self.settings.wsb_ticker_limit}"
+        )
+
+        if trades:
+            trades_formatted = "\n".join(_format_congress_trade_line(trade) for trade in trades[:25])
+            asset_description = trades[0].asset_description
+        else:
+            trades_formatted = "No congressional trades found in local history."
+            asset_description = ticker
+
+        prompt = render_congress_ticker_prompt(
+            ticker=ticker,
+            asset_description=asset_description,
+            trades_formatted=trades_formatted,
+            reddit_rank=reddit_rank,
+            ticker_limit=self.settings.wsb_ticker_limit,
+        )
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Congressional Activity: {ticker}**\n{explanation.strip()}"

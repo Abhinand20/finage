@@ -5,9 +5,10 @@ from typing import Protocol
 
 from finage.artifacts import ArtifactStore
 from finage.collector import WsbCollector
+from finage.congress import CongressAnalyzer, CongressCollector
 from finage.llm import LlmProvider, create_llm_provider
 from finage.models import DigestResult, WsbSnapshot
-from finage.prompting import build_digest_payload, render_digest_prompt
+from finage.prompting import render_congress_digest_prompt, render_digest_prompt
 from finage.settings import Settings
 from finage.web_search import (
     WebSearchOptions,
@@ -21,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 class Collector(Protocol):
     async def collect(self) -> WsbSnapshot:
+        ...
+
+
+class CongressDataSource(Protocol):
+    async def get_or_fetch(self):
+        ...
+
+    def read_new_trades(self):
         ...
 
 
@@ -41,12 +50,43 @@ class DigestService:
         llm_provider: LlmProvider | None = None,
         artifact_store: ArtifactStore | None = None,
         web_search_provider: WebSearchProvider | None = None,
+        congress_collector: CongressDataSource | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.llm_provider = llm_provider or create_llm_provider(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
         self.web_search_provider = web_search_provider or create_web_search_provider(settings)
+        self.congress_collector = congress_collector or CongressCollector(settings)
+
+    async def _congress_prompt_section(self, snapshot: WsbSnapshot) -> str:
+        if not self.settings.congress_enabled:
+            return ""
+        try:
+            congress_snapshot = await self.congress_collector.get_or_fetch()
+            new_trades = self.congress_collector.read_new_trades()
+        except Exception:
+            logger.exception("Congress enrichment failed; continuing without congress section")
+            return ""
+
+        analyzer = CongressAnalyzer()
+        signals = analyzer.top_signals(
+            congress_snapshot.trades,
+            new_trades=new_trades,
+            lookback_days=self.settings.congress_lookback_days,
+            min_score=self.settings.congress_min_signal_score,
+        )
+        evidence_by_ticker = {item.ticker: item for item in snapshot.ticker_evidence}
+        signals = analyzer.apply_convergence_scores(signals, snapshot.trending_tickers, evidence_by_ticker)
+        reddit_tickers = [item.ticker for item in snapshot.trending_tickers[:10]]
+        overlap = sorted(analyzer.overlap_tickers(signals, reddit_tickers))
+        lines = [analyzer.format_signal_line(signal, overlap=signal.ticker in overlap) for signal in signals]
+        congress_section = "\n".join(lines) if lines else "No notable congressional activity this period."
+        return render_congress_digest_prompt(
+            congress_section_markdown=congress_section,
+            lookback_days=self.settings.congress_lookback_days,
+            overlap_tickers=overlap,
+        )
 
     async def _web_search_by_ticker(self, snapshot: WsbSnapshot) -> dict[str, WebSearchResponse]:
         if not self.web_search_provider or not self.settings.digest_web_search_enabled:
@@ -94,6 +134,9 @@ class DigestService:
             prompt_template_path=self.settings.digest_prompt_path,
             prompt_bundle=self.settings.digest_prompt_bundle,
         )
+        congress_prompt = await self._congress_prompt_section(snapshot)
+        if congress_prompt:
+            prompt = f"{prompt}\n\n{congress_prompt}"
         logger.info("Rendered digest prompt with %s characters", len(prompt))
         digest_text = await self.llm_provider.generate(prompt)
         result = DigestResult(
