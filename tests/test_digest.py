@@ -12,6 +12,8 @@ from finage.models import (
     PostEvidence,
     TickerEvidence,
     TrendingTicker,
+    WhaleSignal,
+    WhaleSnapshot,
     WsbSnapshot,
 )
 from finage.prompting import build_digest_payload, build_ticker_why_payload, render_digest_prompt, render_ticker_why_prompt
@@ -402,3 +404,45 @@ async def test_digest_service_skips_congress_when_disabled(tmp_path: Path) -> No
     await service.generate()
 
     assert "CONGRESSIONAL TRADING DATA" not in llm.last_prompt
+
+
+class FakeWhaleCollector:
+    async def get_or_fetch(self):
+        return WhaleSnapshot(
+            signals=[
+                WhaleSignal(
+                    ticker="NVDA",
+                    total_score=6.0,
+                    fund_count=1,
+                    new_count=1,
+                    increased_count=0,
+                    decreased_count=0,
+                    closed_count=0,
+                    total_value_usd=100_000_000,
+                    largest_position_fund="Berkshire Hathaway",
+                    largest_position_value_usd=100_000_000,
+                    funds=["Berkshire Hathaway"],
+                    has_social_overlap=True,
+                    labels=["NEW POSITION", "WHALE + SOCIAL"],
+                )
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_digest_service_appends_whale_context(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.edgar_identity = "finage@example.com"
+    settings.whale_enabled = True
+    llm = FakeLlm()
+    service = DigestService(
+        settings,
+        collector=FakeCollector(make_snapshot()),
+        llm_provider=llm,
+        whale_collector=FakeWhaleCollector(),
+    )
+
+    await service.generate()
+
+    assert "--- WHALE 13F DATA ---" in llm.last_prompt
+    assert "NVDA" in llm.last_prompt

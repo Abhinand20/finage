@@ -9,6 +9,7 @@ from finage.congress import CongressCollector
 from finage.digest import DigestService
 from finage.settings import Settings
 from finage.telegram_bot import TelegramDigestBot, send_digest
+from finage.whale import WhaleCollector
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     congress_parser = subparsers.add_parser("congress", help="Manage congressional trading data")
     congress_subparsers = congress_parser.add_subparsers(dest="congress_command", required=True)
     congress_subparsers.add_parser("refresh", help="Fetch and persist latest Senate and House trades")
+
+    whale_parser = subparsers.add_parser("whale", help="Manage institutional 13F whale data")
+    whale_subparsers = whale_parser.add_subparsers(dest="whale_command", required=True)
+    whale_subparsers.add_parser("refresh", help="Fetch and persist latest 13F whale data")
 
     return parser
 
@@ -60,6 +65,23 @@ async def _run_congress_command(settings: Settings, congress_command: str) -> in
     raise ValueError(f"Unsupported congress command: {congress_command}")
 
 
+async def _run_whale_command(settings: Settings, whale_command: str) -> int:
+    if whale_command == "refresh":
+        collector = WhaleCollector(settings)
+        snapshot = await collector.refresh()
+        tickers = {holding.ticker for fund in snapshot.funds for holding in fund.holdings}
+        print(
+            "Whale refresh complete: "
+            f"funds={len(snapshot.funds)} "
+            f"tickers={len(tickers)} "
+            f"signals={len(snapshot.signals)} "
+            f"cache={collector.base_dir}"
+        )
+        return 0
+
+    raise ValueError(f"Unsupported whale command: {whale_command}")
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
@@ -74,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "congress":
         return asyncio.run(_run_congress_command(settings, args.congress_command))
+
+    if args.command == "whale":
+        return asyncio.run(_run_whale_command(settings, args.whale_command))
 
     raise ValueError(f"Unsupported command: {args.command}")
 

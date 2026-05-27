@@ -115,6 +115,49 @@ async def test_help_lists_live_command() -> None:
     assert "/movers" in message.replies[0]
     assert "/health" in message.replies[0]
     assert "/senate <stock>" in message.replies[0]
+    assert "/whale <stock>" in message.replies[0]
+    assert "/whales" in message.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_whale_requires_one_symbol_argument() -> None:
+    message = FakeMessage()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=FakeBot(), args=[])
+
+    await TelegramDigestBot(make_settings()).whale(update, context)
+
+    assert message.replies == ["Usage: /whale TSLA"]
+
+
+@pytest.mark.asyncio
+async def test_whales_sends_markdown_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMomentumAnalysisService:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def whales(self) -> str:
+            return "**Whale Momentum**\n- NVDA"
+
+    monkeypatch.setattr("finage.telegram_bot.MomentumAnalysisService", FakeMomentumAnalysisService)
+    message = FakeMessage()
+    bot = FakeBot()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=999),
+        effective_message=message,
+    )
+    context = SimpleNamespace(bot=bot, args=[])
+
+    await TelegramDigestBot(make_settings()).whales(update, context)
+
+    assert message.replies == ["Analyzing top whale 13F momentum..."]
+    assert bot.messages[0]["chat_id"] == 999
+    assert "<b>Whale Momentum</b>" in bot.messages[0]["text"]
 
 
 @pytest.mark.asyncio

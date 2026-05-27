@@ -8,8 +8,9 @@ from finage.collector import WsbCollector
 from finage.congress import CongressAnalyzer, CongressCollector
 from finage.llm import LlmProvider, create_llm_provider
 from finage.models import DigestResult, WsbSnapshot
-from finage.prompting import render_congress_digest_prompt, render_digest_prompt
+from finage.prompting import render_congress_digest_prompt, render_digest_prompt, render_whale_digest_prompt
 from finage.settings import Settings
+from finage.whale import WhaleAnalyzer, WhaleCollector
 from finage.web_search import (
     WebSearchOptions,
     WebSearchProvider,
@@ -33,6 +34,11 @@ class CongressDataSource(Protocol):
         ...
 
 
+class WhaleDataSource(Protocol):
+    async def get_or_fetch(self):
+        ...
+
+
 def build_digest_prompt(snapshot: WsbSnapshot) -> str:
     return render_digest_prompt(snapshot)
 
@@ -51,6 +57,7 @@ class DigestService:
         artifact_store: ArtifactStore | None = None,
         web_search_provider: WebSearchProvider | None = None,
         congress_collector: CongressDataSource | None = None,
+        whale_collector: WhaleDataSource | None = None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
@@ -58,6 +65,7 @@ class DigestService:
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
         self.web_search_provider = web_search_provider or create_web_search_provider(settings)
         self.congress_collector = congress_collector or CongressCollector(settings)
+        self.whale_collector = whale_collector or WhaleCollector(settings)
 
     async def _congress_prompt_section(self, snapshot: WsbSnapshot) -> str:
         if not self.settings.congress_enabled:
@@ -87,6 +95,25 @@ class DigestService:
             lookback_days=self.settings.congress_lookback_days,
             overlap_tickers=overlap,
         )
+
+    async def _whale_prompt_section(self, snapshot: WsbSnapshot) -> str:
+        if not self.settings.whale_enabled:
+            return ""
+        try:
+            whale_snapshot = await self.whale_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Whale enrichment failed; continuing without whale section")
+            return ""
+
+        analyzer = WhaleAnalyzer()
+        signals = analyzer.apply_convergence(
+            whale_snapshot.signals,
+            reddit_tickers=snapshot.trending_tickers,
+            congress_signals=None,
+        )
+        lines = [analyzer.format_signal_line(signal) for signal in signals[:5]]
+        signal_lines = "\n".join(lines) if lines else "No notable whale 13F momentum this period."
+        return render_whale_digest_prompt(signal_lines=signal_lines)
 
     async def _web_search_by_ticker(self, snapshot: WsbSnapshot) -> dict[str, WebSearchResponse]:
         if not self.web_search_provider or not self.settings.digest_web_search_enabled:
@@ -137,6 +164,9 @@ class DigestService:
         congress_prompt = await self._congress_prompt_section(snapshot)
         if congress_prompt:
             prompt = f"{prompt}\n\n{congress_prompt}"
+        whale_prompt = await self._whale_prompt_section(snapshot)
+        if whale_prompt:
+            prompt = f"{prompt}\n\n{whale_prompt}"
         logger.info("Rendered digest prompt with %s characters", len(prompt))
         digest_text = await self.llm_provider.generate(prompt)
         result = DigestResult(

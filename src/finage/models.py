@@ -128,3 +128,61 @@ class CongressSignal(BaseModel):
     is_cluster: bool
     is_bicameral: bool
     convergence_score: float | None = None
+
+
+class WhaleHolding(BaseModel):
+    ticker: str
+    cusip: str | None = None
+    shares: int
+    value_usd: int
+    weight: float = 0.0
+
+
+class WhaleChange(BaseModel):
+    status: Literal["NEW", "INCREASED", "DECREASED", "CLOSED", "UNCHANGED"]
+    ticker: str
+    shares_delta: int
+    shares_delta_pct: float | None = None
+    value_delta_usd: int
+    prior_shares: int
+    prior_value_usd: int
+    current_shares: int
+    current_value_usd: int
+
+
+class WhaleFundSnapshot(BaseModel):
+    slug: str
+    fund_name: str
+    manager: str
+    cik: str
+    report_period: date
+    filing_accession: str | None = None
+    total_holdings: int = 0
+    total_value_usd: int = 0
+    holdings: list[WhaleHolding] = Field(default_factory=list)
+    changes: list[WhaleChange] = Field(default_factory=list)
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class WhaleSignal(BaseModel):
+    ticker: str
+    total_score: float
+    convergence_score: float | None = None
+    fund_count: int
+    new_count: int
+    increased_count: int
+    decreased_count: int
+    closed_count: int
+    total_value_usd: int
+    largest_position_fund: str
+    largest_position_value_usd: int
+    funds: list[str] = Field(default_factory=list)
+    has_social_overlap: bool = False
+    has_congress_overlap: bool = False
+    labels: list[str] = Field(default_factory=list)
+
+
+class WhaleSnapshot(BaseModel):
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    funds: list[WhaleFundSnapshot] = Field(default_factory=list)
+    signals: list[WhaleSignal] = Field(default_factory=list)

@@ -142,6 +142,8 @@ class TelegramDigestBot:
         application.add_handler(CommandHandler("why", self.why))
         application.add_handler(CommandHandler("movers", self.movers))
         application.add_handler(CommandHandler("senate", self.senate))
+        application.add_handler(CommandHandler("whale", self.whale))
+        application.add_handler(CommandHandler("whales", self.whales))
         application.add_handler(CommandHandler("health", self.health))
         application.run_polling()
 
@@ -151,7 +153,8 @@ class TelegramDigestBot:
         await update.effective_message.reply_text(
             "Finage is running. Use /digest for a full digest, /live for an ad hoc scan, "
             "/ticker TSLA for focused ticker evidence, /why TSLA for an explanation, "
-            "/senate TSLA for congressional trading analysis, /movers for changes versus the latest digest, "
+            "/senate TSLA for congressional trading analysis, /whale TSLA for institutional 13F activity, "
+            "/whales for top whale momentum, /movers for changes versus the latest digest, "
             "or /health for bot status."
         )
 
@@ -165,6 +168,8 @@ class TelegramDigestBot:
             "/ticker <stock> - run a fresh scan and return focused evidence for one ticker.\n"
             "/why <stock> - explain the strongest narratives behind one ticker using Gemini.\n"
             "/senate <stock> - analyze Senate and House trading disclosures for one ticker.\n"
+            "/whale <stock> - analyze top-10 institutional 13F activity for one ticker.\n"
+            "/whales - summarize top whale momentum across the watchlist.\n"
             "/movers - compare a fresh scan against the latest saved digest snapshot.\n"
             "/health - check config, artifacts, data directory, and ApeWisdom reachability."
         )
@@ -278,6 +283,48 @@ class TelegramDigestBot:
         except Exception:
             logger.exception("Failed to generate senate brief")
             await update.effective_message.reply_text("Senate analysis failed. Check the Pi logs.")
+
+    async def whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        if len(context.args) != 1:
+            await update.effective_message.reply_text("Usage: /whale TSLA")
+            return
+
+        try:
+            symbol = normalize_ticker_symbol(context.args[0])
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc).replace("/ticker", "/whale"))
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /whale request from user_id=%s chat_id=%s ticker=%s", user_id, chat_id, symbol)
+        await update.effective_message.reply_text(f"Analyzing whale 13F activity for {symbol}...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).whale(symbol)
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /whale request for chat_id=%s ticker=%s", chat_id, symbol)
+        except Exception:
+            logger.exception("Failed to generate whale brief")
+            await update.effective_message.reply_text("Whale analysis failed. Check the Pi logs.")
+
+    async def whales(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update, context):
+            return
+
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        user_id = update.effective_user.id if update.effective_user else None
+        logger.info("Received /whales request from user_id=%s chat_id=%s", user_id, chat_id)
+        await update.effective_message.reply_text("Analyzing top whale 13F momentum...")
+        try:
+            brief = await MomentumAnalysisService(self.settings).whales()
+            await send_markdown_text(context.bot, update.effective_chat.id, brief)
+            logger.info("Completed /whales request for chat_id=%s", chat_id)
+        except Exception:
+            logger.exception("Failed to generate whales brief")
+            await update.effective_message.reply_text("Whales analysis failed. Check the Pi logs.")
 
     async def movers(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update, context):

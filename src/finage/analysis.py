@@ -13,8 +13,14 @@ from finage.collector import WsbCollector
 from finage.congress import CongressAnalyzer, CongressCollector
 from finage.llm import LlmProvider, create_llm_provider
 from finage.models import CongressTrade, PostEvidence, TickerEvidence, TrendingTicker, WsbSnapshot
-from finage.prompting import render_congress_ticker_prompt, render_ticker_why_prompt
+from finage.prompting import (
+    render_congress_ticker_prompt,
+    render_ticker_why_prompt,
+    render_whale_ticker_prompt,
+    render_whales_digest_prompt,
+)
 from finage.settings import Settings
+from finage.whale import WHALE_WATCHLIST, WhaleAnalyzer, WhaleCollector
 
 logger = logging.getLogger(__name__)
 TICKER_RE = re.compile(r"^\$?[A-Za-z]{1,5}$")
@@ -387,6 +393,23 @@ def _format_congress_trade_line(trade: CongressTrade) -> str:
     )
 
 
+def _format_whale_activity_line(activity: dict) -> str:
+    holding = activity.get("holding") or {}
+    change = activity.get("change") or {}
+    status = change.get("status", "HELD")
+    value = holding.get("value_usd") or change.get("current_value_usd") or 0
+    delta = change.get("value_delta_usd")
+    delta_text = f", delta ${delta:,}" if isinstance(delta, int) else ""
+    return (
+        f"- {activity.get('fund')} ({activity.get('manager')}), report {activity.get('report_period')}: "
+        f"{status} position worth ${value:,}{delta_text}"
+    )
+
+
+def _watchlist_summary() -> str:
+    return ", ".join(f"{fund.fund_name} ({fund.manager})" for fund in WHALE_WATCHLIST)
+
+
 def format_live_brief(snapshot: WsbSnapshot, *, limit: int = 5, congress_badges: set[str] | None = None) -> str:
     """Build a deterministic Telegram-ready brief for the latest social momentum scan."""
 
@@ -462,12 +485,14 @@ class MomentumAnalysisService:
         artifact_store: ArtifactStore | None = None,
         llm_provider: LlmProvider | None = None,
         congress_collector=None,
+        whale_collector=None,
     ):
         self.settings = settings
         self.collector = collector or WsbCollector(settings)
         self.artifact_store = artifact_store or ArtifactStore(settings.data_dir)
         self.llm_provider = llm_provider or create_llm_provider(settings)
         self.congress_collector = congress_collector or CongressCollector(settings)
+        self.whale_collector = whale_collector or WhaleCollector(settings)
 
     async def _congress_badges_for_snapshot(self, snapshot: WsbSnapshot) -> set[str]:
         if not self.settings.congress_enabled:
@@ -699,3 +724,49 @@ class MomentumAnalysisService:
         )
         explanation = await self.llm_provider.generate(prompt)
         return f"**Congressional Activity: {ticker}**\n{explanation.strip()}"
+
+    async def whale(self, symbol: str) -> str:
+        ticker = normalize_ticker_symbol(symbol)
+        if not self.settings.whale_enabled:
+            return "Whale tracking is disabled. Set EDGAR_IDENTITY to enable SEC 13F tracking."
+        try:
+            snapshot = await self.whale_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Whale data unavailable for ticker=%s", ticker)
+            return "Whale data unavailable. SEC EDGAR could not be reached and no local cache is available."
+
+        activities = self.whale_collector.activities_for_ticker(ticker)
+        signal = next((item for item in snapshot.signals if item.ticker == ticker), None)
+        fund_lines = (
+            "\n".join(_format_whale_activity_line(activity) for activity in activities[:25])
+            if activities
+            else "No top-10 whale activity found in local 13F history."
+        )
+        labels = signal.labels if signal else []
+        prompt = render_whale_ticker_prompt(
+            ticker=ticker,
+            asset_description=ticker,
+            watchlist_summary=_watchlist_summary(),
+            fund_lines=fund_lines,
+            labels=labels,
+            reddit_rank="not checked for this request",
+            congress_summary="not checked for this request",
+        )
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Whale Activity: {ticker}**\n{explanation.strip()}"
+
+    async def whales(self, top_n: int = 5) -> str:
+        if not self.settings.whale_enabled:
+            return "Whale tracking is disabled. Set EDGAR_IDENTITY to enable SEC 13F tracking."
+        try:
+            snapshot = await self.whale_collector.get_or_fetch()
+        except Exception:
+            logger.exception("Whale momentum data unavailable")
+            return "Whale data unavailable. SEC EDGAR could not be reached and no local cache is available."
+
+        analyzer = WhaleAnalyzer()
+        lines = [analyzer.format_signal_line(signal) for signal in snapshot.signals[:top_n]]
+        signal_lines = "\n".join(lines) if lines else "No notable whale 13F momentum this period."
+        prompt = render_whales_digest_prompt(signal_lines=signal_lines, top_n=top_n)
+        explanation = await self.llm_provider.generate(prompt)
+        return f"**Whale Momentum**\n{explanation.strip()}"
