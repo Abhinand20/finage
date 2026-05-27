@@ -251,6 +251,15 @@ def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _holdings_rows(filing: Any) -> list[dict[str, Any]]:
+    if hasattr(filing, "holdings_view"):
+        return _frame_records(filing.holdings_view())
+    if hasattr(filing, "holdings_data"):
+        return _frame_records(filing.holdings_data())
+    holdings = _get_attr(filing, "holdings", None)
+    return _frame_records(holdings)
+
+
 class WhaleCollector:
     def __init__(
         self,
@@ -321,6 +330,9 @@ class WhaleCollector:
                 continue
             funds.append(snapshot)
 
+        if not funds:
+            raise RuntimeError("No whale filings were fetched; check EDGAR_IDENTITY, network access, and edgartools API compatibility.")
+
         analyzer = WhaleAnalyzer()
         signals = analyzer.top_signals(funds, min_score=self.settings.whale_min_signal_score)
         snapshot = WhaleSnapshot(fetched_at=fetched_at, funds=funds, signals=signals)
@@ -335,7 +347,7 @@ class WhaleCollector:
         total_value_usd = _value_to_usd(_get_attr(filing, "total_value", 0))
         holdings = [
             normalize_whale_holding(row, total_value_usd=total_value_usd)
-            for row in _frame_records(filing.holdings_data())
+            for row in _holdings_rows(filing)
             if _first_present(row, "Ticker", "Symbol", "ticker", default="")
         ]
         comparison = filing.compare_holdings()

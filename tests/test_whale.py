@@ -202,6 +202,14 @@ class FakeThirteenF:
         )
 
 
+class FakeThirteenFWithHoldingsView(FakeThirteenF):
+    def holdings_view(self):
+        return FakeFrame([{"Ticker": "NVDA", "CUSIP": "67066G104", "Shares": 100, "Value": 2500}])
+
+    def holdings_data(self):
+        raise AttributeError("'ThirteenF' object has no attribute 'holdings_data'")
+
+
 class FakeFilings:
     def __getitem__(self, index: int):
         assert index == 0
@@ -209,6 +217,11 @@ class FakeFilings:
 
     def obj(self):
         return FakeThirteenF()
+
+
+class FakeViewFilings(FakeFilings):
+    def obj(self):
+        return FakeThirteenFWithHoldingsView()
 
 
 class FakeCompany:
@@ -223,6 +236,17 @@ class FakeCompany:
         return FakeFilings()
 
 
+class FakeViewCompany(FakeCompany):
+    def get_filings(self, form: str):
+        assert form == "13F-HR"
+        return FakeViewFilings()
+
+
+class BrokenCompany(FakeCompany):
+    def get_filings(self, form: str):
+        raise AttributeError("'ThirteenF' object has no attribute 'holdings_data'")
+
+
 class FakeEdgar:
     Company = FakeCompany
     identities: list[str] = []
@@ -230,6 +254,14 @@ class FakeEdgar:
     @classmethod
     def set_identity(cls, identity: str) -> None:
         cls.identities.append(identity)
+
+
+class FakeViewEdgar(FakeEdgar):
+    Company = FakeViewCompany
+
+
+class BrokenEdgar(FakeEdgar):
+    Company = BrokenCompany
 
 
 @pytest.mark.asyncio
@@ -253,6 +285,36 @@ async def test_whale_collector_refresh_persists_snapshot_and_ticker_files(tmp_pa
     assert (tmp_path / "whale" / "signals.json").exists()
     assert (tmp_path / "whale" / "by_fund" / "berkshire-hathaway.json").exists()
     assert (tmp_path / "whale" / "by_ticker" / "NVDA.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_whale_collector_supports_edgartools_holdings_view_api(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, edgar_identity="finage@example.com")
+    collector = WhaleCollector(
+        settings,
+        edgar_module=FakeViewEdgar,
+        now_provider=lambda: datetime(2026, 5, 26, tzinfo=UTC),
+    )
+
+    snapshot = await collector.refresh()
+
+    assert snapshot.funds
+    assert snapshot.funds[0].holdings[0].ticker == "NVDA"
+
+
+@pytest.mark.asyncio
+async def test_whale_refresh_raises_when_every_fund_fails_without_cache(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, edgar_identity="finage@example.com")
+    collector = WhaleCollector(
+        settings,
+        edgar_module=BrokenEdgar,
+        now_provider=lambda: datetime(2026, 5, 26, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError, match="No whale filings were fetched"):
+        await collector.refresh()
+
+    assert not (tmp_path / "whale" / "latest.json").exists()
 
 
 @pytest.mark.asyncio
