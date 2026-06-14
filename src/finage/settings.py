@@ -18,6 +18,7 @@ DEFAULT_STOCK_SUBREDDITS = [
     "Daytrading",
     "pennystocks",
 ]
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
 
 def _parse_int_list(raw: str | None) -> list[int]:
@@ -67,7 +68,7 @@ class Settings(BaseModel):
 
     llm_provider: Literal["gemini"] = "gemini"
     gemini_api_key: str = Field(min_length=1)
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
 
     wsb_subreddit: str = "wallstreetbets"
     wsb_subreddits: list[str] = Field(default_factory=lambda: list(DEFAULT_STOCK_SUBREDDITS))
@@ -143,7 +144,7 @@ class Settings(BaseModel):
             "telegram_default_chat_id": _optional_int(os.getenv("TELEGRAM_DEFAULT_CHAT_ID")),
             "llm_provider": os.getenv("LLM_PROVIDER", "gemini"),
             "gemini_api_key": os.environ["GEMINI_API_KEY"],
-            "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "gemini_model": os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             "wsb_subreddit": os.getenv("WSB_SUBREDDIT", "wallstreetbets"),
             "wsb_post_limit": _int_env("WSB_POST_LIMIT", 75),
             "wsb_ticker_limit": _int_env("WSB_TICKER_LIMIT", 10),
